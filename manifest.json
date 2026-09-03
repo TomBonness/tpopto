@@ -62,17 +62,17 @@
     {
       "source": "patches/sglang-environ-glm53.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/environ.py",
-      "sha256": "366db22da2ef010cf3bed569906d0df46b407504fccc335da69f4eb363cdd55f"
+      "sha256": "51fa075470d50306ad65133564868bfdb956ea49bb51d21c2f21d20640b09336"
     },
     {
       "source": "patches/sglang-dflash_ngram-glm53.py",
       "target": "/sgl-workspace/sglang/python/sglang/kernels/ops/speculative/dflash_ngram.py",
-      "sha256": "60fcf268044b9e215b37c2cc4c19854c6aee1b32126607c68b3157da03fe6dac"
+      "sha256": "bac364ffaa726255e9317b3cae3a479987291213f63ca2f5f10e4cc875a3da01"
     },
     {
       "source": "patches/sglang-dflash_worker_v2-glm53.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/speculative/dflash_worker_v2.py",
-      "sha256": "ef8df7e3a91eac3a09c92f41ff0cceb34a6a69176b3651bda9d4e1d27f3b1035"
+      "sha256": "cab04146997128f48869439aa72d0578dfd1c9e19b8f1449e2d4fadf53c19159"
     }
   ],
   "hardware": {
@@ -119,8 +119,8 @@
       "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
       "SGLANG_OPT_FP8_WO_A_GEMM": "0",
       "SGLANG_DFLASH_NGRAM_PRIMARY": "0",
-      "SGLANG_DFLASH_NGRAM_WINDOW": "2048",
-      "SGLANG_DFLASH_NGRAM_GRAM_SIZE": "8"
+      "SGLANG_DFLASH_NGRAM_WINDOW": "8192",
+      "SGLANG_DFLASH_NGRAM_GRAM_SIZES": "8,6,4"
     }
   },
   "validation": {

@@ -24,8 +24,8 @@ ENV CUDA_DEVICE_ORDER=PCI_BUS_ID \
     SGLANG_OPT_DEEPGEMM_HC_PRENORM=0 \
     SGLANG_OPT_FP8_WO_A_GEMM=0 \
     SGLANG_DFLASH_NGRAM_PRIMARY=0 \
-    SGLANG_DFLASH_NGRAM_WINDOW=2048 \
-    SGLANG_DFLASH_NGRAM_GRAM_SIZE=8
+    SGLANG_DFLASH_NGRAM_WINDOW=8192 \
+    SGLANG_DFLASH_NGRAM_GRAM_SIZES=8,6,4
 
 # SM120 compatibility patches, written over the editable-install sources at the same
 # paths run-sglang.sh bind-mounts, so image behavior matches the live deployment.

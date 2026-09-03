@@ -82,8 +82,8 @@
       "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
       "SGLANG_OPT_FP8_WO_A_GEMM": "1",
       "SGLANG_DFLASH_NGRAM_PRIMARY": "0",
-      "SGLANG_DFLASH_NGRAM_WINDOW": "2048",
-      "SGLANG_DFLASH_NGRAM_GRAM_SIZE": "8"
+      "SGLANG_DFLASH_NGRAM_WINDOW": "8192",
+      "SGLANG_DFLASH_NGRAM_GRAM_SIZES": "8,6,4"
     },
     "prefix_cache": {
       "enabled": true,
@@ -99,7 +99,7 @@
     "promotion_threshold_decode_gain_fraction": 0.03,
     "isolated_candidates": {
       "replayssm-spec": "Fold only the accepted prefix instead of copying full recurrent-state snapshots per draft token.",
-      "ngram-primary": "At temperature zero, skip the neural draft only when exact recent history provides the entire proposal; target verification remains authoritative.",
+      "ngram-primary": "For greedy coding requests, query an 8K-token GPU hash index at exact 8-, 6-, then 4-token orders and skip the neural draft only for a complete observed continuation; target verification remains authoritative.",
       "topk-v2": "Use the corrected JIT radix top-k and direct output-buffer planning.",
       "kpool-metadata": "Fuse KPool metadata transforms into device kernels.",
       "ingraph-metadata": "Replay target-verify metadata refresh inside the CUDA graph.",

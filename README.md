@@ -224,6 +224,8 @@ The optimized bundle was staged at `2026-09-03T05:57:37Z`; the staging run
 revalidated the target shard inventory and locked metadata, fully hashed the
 2.34 GB draft checkpoint, and left no B300 pod active. Its per-file deployment
 record is `/workspace/runpod-b300-stage-verification.json`.
+The coding prompt-lookup candidate described below was added after that staging
+record and has intentionally not been copied to the Runpod volume.
 
 The prior live width-eight coding request produced coherent output at 436.47
 decode tokens/s with 1,137.18 ms TTFT. That number records the pre-optimization
@@ -246,10 +248,13 @@ that prefix forces a normal prefill and does not reuse stale state.
 Select exactly one isolated candidate with `DFLASH_PERF_EXPERIMENT`:
 
 - `replayssm-spec` — fold only the accepted recurrent-state prefix.
-- `ngram-primary` — at temperature zero, search the latest 2,048 committed
-  tokens for an exact eight-token suffix match with a complete observed
-  continuation. A hit skips the neural draft but still runs normal target
-  verification; a miss or any sampled request uses the neural draft unchanged.
+- `ngram-primary` — for greedy coding requests, query an 8,192-token GPU
+  open-addressed hash index in exact 8-, 6-, then 4-token order. The index
+  returns only a complete continuation already present in the prompt or
+  committed history; hash hits are token-checked before use. A hit skips the
+  neural draft but still runs normal target verification. A miss or sampled
+  request uses the neural draft unchanged. The candidate requires the B300
+  profile's single running request.
 - `topk-v2` — corrected JIT radix selection plus direct plan output.
 - `kpool-metadata` — fuse the KPool metadata transforms.
 - `ingraph-metadata` — add the target-verify metadata refresh to the CUDA graph.

@@ -1146,11 +1146,12 @@ class Envs:
     SGLANG_ENABLE_OVERLAP_PLAN_STREAM = EnvBool(False)
     # A/B: keep the DFLASH draft greedy head eager (not folded in-graph).
     SGLANG_DFLASH_EAGER_DRAFT_SAMPLER = EnvBool(False)
-    # Exact-history DFLASH proposer. It only skips the neural draft when every
-    # request has a full observed continuation; target verification is unchanged.
+    # Exact-history DFLASH prompt lookup. It only skips the neural draft when
+    # every request has a complete observed continuation; target verification
+    # is unchanged. Orders are tried left-to-right.
     SGLANG_DFLASH_NGRAM_PRIMARY = EnvBool(False)
-    SGLANG_DFLASH_NGRAM_WINDOW = EnvInt(2048)
-    SGLANG_DFLASH_NGRAM_GRAM_SIZE = EnvInt(8)
+    SGLANG_DFLASH_NGRAM_WINDOW = EnvInt(8192)
+    SGLANG_DFLASH_NGRAM_GRAM_SIZES = EnvStr("8,6,4")
     SGLANG_RAGGED_VERIFY_MODE = EnvStr("static")
     SGLANG_TEST_RAGGED_VERIFY_FORCE_UNIFORM_CAPTURE = EnvBool(False)
     # Skip draft_extend while adaptive spec is at steps=0 (drafting disabled).

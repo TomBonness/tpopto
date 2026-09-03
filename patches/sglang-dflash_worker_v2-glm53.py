@@ -15,6 +15,7 @@ from sglang.kernels.ops.speculative.dflash import (
 )
 from sglang.kernels.ops.speculative.dflash_ngram import (
     append_dflash_ngram_committed,
+    build_dflash_prompt_index,
     propose_dflash_ngram,
 )
 from sglang.kernels.ops.speculative.dspark.dspark_accept import (
@@ -412,24 +413,49 @@ class DFlashWorkerV2(BaseSpecWorker):
         # gather's implicit nonzero D2H + lengths.max().item()); keep it only
         # for platforms without GPU triton.
         self._use_triton_compact_rebuild = supports_gpu_triton
-        self._use_ngram_primary = (
-            envs.SGLANG_DFLASH_NGRAM_PRIMARY.get() and supports_gpu_triton
-        )
+        ngram_requested = envs.SGLANG_DFLASH_NGRAM_PRIMARY.get()
+        self._use_ngram_primary = ngram_requested and supports_gpu_triton
         self._ngram_window = int(envs.SGLANG_DFLASH_NGRAM_WINDOW.get())
-        self._ngram_gram_size = int(envs.SGLANG_DFLASH_NGRAM_GRAM_SIZE.get())
-        if not 1 <= self._ngram_gram_size <= min(32, self._ngram_window):
+        raw_orders = envs.SGLANG_DFLASH_NGRAM_GRAM_SIZES.get()
+        try:
+            self._ngram_gram_sizes_cpu = tuple(
+                int(value.strip()) for value in raw_orders.split(",") if value.strip()
+            )
+        except ValueError as error:
             raise ValueError(
-                "SGLANG_DFLASH_NGRAM_GRAM_SIZE must be between 1 and "
-                "min(32, SGLANG_DFLASH_NGRAM_WINDOW)."
+                "SGLANG_DFLASH_NGRAM_GRAM_SIZES must be comma-separated integers."
+            ) from error
+        if (
+            not self._ngram_gram_sizes_cpu
+            or len(set(self._ngram_gram_sizes_cpu))
+            != len(self._ngram_gram_sizes_cpu)
+            or any(
+                order < 1 or order > min(16, self._ngram_window)
+                for order in self._ngram_gram_sizes_cpu
             )
-        if self._ngram_window > 8192:
-            raise ValueError("SGLANG_DFLASH_NGRAM_WINDOW must not exceed 8192.")
-        if envs.SGLANG_DFLASH_NGRAM_PRIMARY.get() and not supports_gpu_triton:
+        ):
+            raise ValueError(
+                "SGLANG_DFLASH_NGRAM_GRAM_SIZES must contain unique orders "
+                "between 1 and min(16, SGLANG_DFLASH_NGRAM_WINDOW)."
+            )
+        if self._ngram_window > 16384:
+            raise ValueError("SGLANG_DFLASH_NGRAM_WINDOW must not exceed 16384.")
+        if ngram_requested and not supports_gpu_triton:
             logger.warning(
-                "DFLASH n-gram primary requires CUDA/HIP Triton; using the neural draft."
+                "DFLASH prompt lookup requires CUDA/HIP Triton; using the neural draft."
             )
+        if ngram_requested and get_schedule().max_running_requests != 1:
+            raise ValueError(
+                "DFLASH prompt lookup currently requires --max-running-requests 1."
+            )
+
         self._ngram_history: Optional[torch.Tensor] = None
-        self._ngram_found_buf: Optional[torch.Tensor] = None
+        self._ngram_gram_sizes: Optional[torch.Tensor] = None
+        self._ngram_index_keys: Optional[torch.Tensor] = None
+        self._ngram_index_values: Optional[torch.Tensor] = None
+        self._ngram_candidate_chains: Optional[torch.Tensor] = None
+        self._ngram_order_found: Optional[torch.Tensor] = None
+        self._ngram_selected_found: Optional[torch.Tensor] = None
         self._ngram_logged_first_hit = False
         self._ngram_attempts = 0
         self._ngram_hits = 0
@@ -442,12 +468,32 @@ class DFlashWorkerV2(BaseSpecWorker):
                 dtype=torch.int64,
                 device=self.device,
             )
+            self._ngram_gram_sizes = torch.tensor(
+                self._ngram_gram_sizes_cpu,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            context_len = int(self.model_runner.model_config.context_len)
+            max_entries = len(self._ngram_gram_sizes_cpu) * (
+                context_len + self._ngram_window
+            )
+            index_capacity = 1 << max(10, (2 * max_entries - 1).bit_length())
+            # One extra slot is a no-op destination for inactive CAS lanes.
+            self._ngram_index_keys = torch.zeros(
+                (index_capacity + 1,), dtype=torch.int64, device=self.device
+            )
+            self._ngram_index_values = torch.full(
+                (index_capacity + 1,), -1, dtype=torch.int64, device=self.device
+            )
             if self.ps.tp_rank == 0:
+                index_mib = (index_capacity + 1) * 16 / (1024 * 1024)
                 logger.info(
-                    "DFLASH exact-history n-gram primary enabled. "
-                    "window=%d gram_size=%d",
+                    "DFLASH GPU prompt lookup enabled. window=%d orders=%s "
+                    "index_capacity=%d index_mib=%.2f",
                     self._ngram_window,
-                    self._ngram_gram_size,
+                    self._ngram_gram_sizes_cpu,
+                    index_capacity,
+                    index_mib,
                 )
         self._accept_bonus_buffer_cap: int = 0
         self._accept_bonus_buffer_slot: int = 0
@@ -718,14 +764,31 @@ class DFlashWorkerV2(BaseSpecWorker):
             (new_cap,), dtype=torch.int32, device="cpu"
         )
         if self._use_ngram_primary:
-            self._ngram_found_buf = torch.empty(
+            num_orders = len(self._ngram_gram_sizes_cpu)
+            self._ngram_candidate_chains = torch.empty(
+                (num_orders, new_cap, block_size),
+                dtype=torch.int64,
+                device=device,
+            )
+            self._ngram_order_found = torch.empty(
+                (num_orders, new_cap), dtype=torch.int32, device=device
+            )
+            self._ngram_selected_found = torch.empty(
                 (new_cap,), dtype=torch.int32, device=device
             )
 
     def _seed_ngram_history(self, batch: ScheduleBatch) -> None:
-        """Seed full request suffixes, including RadixCache-reused prompt tokens."""
-        if not self._use_ngram_primary or self._ngram_history is None:
+        """Seed RadixCache-reused prompt tokens and rebuild their GPU hash index."""
+        if (
+            not self._use_ngram_primary
+            or self._ngram_history is None
+            or self._ngram_gram_sizes is None
+            or self._ngram_index_keys is None
+            or self._ngram_index_values is None
+        ):
             return
+        self._ngram_index_keys.zero_()
+        self._ngram_index_values.fill_(-1)
         for req in batch.reqs:
             if req.req_pool_idx is None or req.extend_range is None:
                 continue
@@ -741,6 +804,15 @@ class DFlashWorkerV2(BaseSpecWorker):
                 start, seq_len, dtype=torch.int64, device=self.device
             ).remainder_(self._ngram_window)
             self._ngram_history[int(req.req_pool_idx), slots] = tokens
+            build_dflash_prompt_index(
+                history=self._ngram_history,
+                req_pool_idx=int(req.req_pool_idx),
+                prefix_len=seq_len,
+                gram_sizes=self._ngram_gram_sizes,
+                index_keys=self._ngram_index_keys,
+                index_values=self._ngram_index_values,
+                draft_token_num=int(self.block_size),
+            )
 
     def _try_ngram_primary(
         self,
@@ -754,34 +826,43 @@ class DFlashWorkerV2(BaseSpecWorker):
         if (
             not self._use_ngram_primary
             or self._ngram_history is None
-            or self._ngram_found_buf is None
+            or self._ngram_gram_sizes is None
+            or self._ngram_index_keys is None
+            or self._ngram_index_values is None
+            or self._ngram_candidate_chains is None
+            or self._ngram_order_found is None
+            or self._ngram_selected_found is None
             or not _is_all_greedy(batch.sampling_info)
         ):
             return False
         try:
             hit = propose_dflash_ngram(
                 history=self._ngram_history,
+                gram_sizes=self._ngram_gram_sizes,
+                index_keys=self._ngram_index_keys,
+                index_values=self._ngram_index_values,
                 req_pool_indices=batch.req_pool_indices,
                 prefix_lens=prefix_lens,
                 bonus_tokens=draft_input.bonus_tokens,
+                candidate_chains=self._ngram_candidate_chains[:, :bs],
+                order_found=self._ngram_order_found[:, :bs],
                 draft_tokens_out=draft_tokens,
-                found_out=self._ngram_found_buf[:bs],
-                gram_size=self._ngram_gram_size,
+                selected_found=self._ngram_selected_found[:bs],
             )
         except Exception as error:
             self._use_ngram_primary = False
             logger.warning(
-                "DFLASH n-gram primary failed; using the neural draft: %s", error
+                "DFLASH prompt lookup failed; using the neural draft: %s", error
             )
             return False
         self._ngram_attempts += 1
         self._ngram_hits += int(hit)
         if hit and not self._ngram_logged_first_hit and self.ps.tp_rank == 0:
-            logger.info("DFLASH n-gram primary produced its first exact-history chain.")
+            logger.info("DFLASH prompt lookup produced its first exact-history chain.")
             self._ngram_logged_first_hit = True
         if self._ngram_attempts % 256 == 0 and self.ps.tp_rank == 0:
             logger.info(
-                "DFLASH n-gram primary stats. attempts=%d hits=%d hit_rate=%.4f",
+                "DFLASH prompt lookup stats. attempts=%d hits=%d hit_rate=%.4f",
                 self._ngram_attempts,
                 self._ngram_hits,
                 self._ngram_hits / self._ngram_attempts,
@@ -793,26 +874,37 @@ class DFlashWorkerV2(BaseSpecWorker):
         *,
         batch: ScheduleBatch,
         prefix_lens: torch.Tensor,
-        out_tokens: torch.Tensor,
+        draft_tokens: torch.Tensor,
         commit_lens: torch.Tensor,
     ) -> None:
-        if not self._use_ngram_primary or self._ngram_history is None:
+        if (
+            not self._use_ngram_primary
+            or self._ngram_history is None
+            or self._ngram_gram_sizes is None
+            or self._ngram_index_keys is None
+            or self._ngram_index_values is None
+        ):
             return
         try:
+            # DFlash's returned out_tokens are candidates shifted left plus the
+            # next bonus. The KV/history positions being committed are instead
+            # the verify inputs: anchor plus accepted candidate prefix.
             append_dflash_ngram_committed(
                 history=self._ngram_history,
+                gram_sizes=self._ngram_gram_sizes,
+                index_keys=self._ngram_index_keys,
+                index_values=self._ngram_index_values,
                 req_pool_indices=batch.req_pool_indices,
                 prefix_lens=prefix_lens,
-                committed_tokens=out_tokens,
+                committed_tokens=draft_tokens,
                 commit_lens=commit_lens,
             )
         except Exception as error:
             self._use_ngram_primary = False
             logger.warning(
-                "DFLASH n-gram history append failed; using the neural draft: %s",
+                "DFLASH prompt history append failed; using the neural draft: %s",
                 error,
             )
-
     def __getattr__(self, name):
         # Delegate anything not implemented yet to the target worker. Guard
         # the backing field so a lookup before __init__ sets it raises
@@ -827,6 +919,10 @@ class DFlashWorkerV2(BaseSpecWorker):
         # the target/draft KV pools owned by the target worker.
         if self._ngram_history is not None:
             self._ngram_history.fill_(-1)
+        if self._ngram_index_keys is not None:
+            self._ngram_index_keys.zero_()
+        if self._ngram_index_values is not None:
+            self._ngram_index_values.fill_(-1)
 
     def _gather_req_to_token_masked(
         self,
@@ -2289,7 +2385,7 @@ class DFlashWorkerV2(BaseSpecWorker):
         self._append_ngram_history(
             batch=batch,
             prefix_lens=prefix_lens,
-            out_tokens=out_tokens,
+            draft_tokens=draft_tokens,
             commit_lens=commit_lens,
         )
         if on_publish is not None:

@@ -213,30 +213,37 @@ def validate_patch_logic() -> None:
     check("w13_input_scale" in quant and "w2_input_scale" in quant, "ModelOpt MoE registers both activation-scale tensors")
     check(
         "SGLANG_DFLASH_NGRAM_PRIMARY = EnvBool(False)" in environ
-        and "SGLANG_DFLASH_NGRAM_WINDOW = EnvInt(2048)" in environ
-        and "SGLANG_DFLASH_NGRAM_GRAM_SIZE = EnvInt(8)" in environ,
-        "n-gram proposer controls default off with bounded exact-match settings",
+        and "SGLANG_DFLASH_NGRAM_WINDOW = EnvInt(8192)" in environ
+        and 'SGLANG_DFLASH_NGRAM_GRAM_SIZES = EnvStr("8,6,4")' in environ,
+        "prompt lookup defaults off with coding-oriented bounded orders",
     )
     check(
         "used_ngram = self._try_ngram_primary(" in dflash_worker
         and "or not _is_all_greedy(batch.sampling_info)" in dflash_worker
         and dflash_worker.index("used_ngram = self._try_ngram_primary(")
         < dflash_worker.index("# --- 2) Target verify."),
-        "DFlash only replaces the draft proposal and retains target verification",
+        "DFlash only replaces greedy draft proposals and retains target verification",
     )
     check(
         "append_dflash_ngram_committed(" in dflash_worker
-        and "committed_tokens=out_tokens" in dflash_worker
+        and "committed_tokens=draft_tokens" in dflash_worker
+        and "committed_tokens=out_tokens" not in dflash_worker
         and "commit_lens=commit_lens" in dflash_worker,
-        "n-gram history receives only target-verified committed tokens",
+        "prompt history commits verify inputs rather than shifted output tokens",
     )
     check(
-        "latest_full_start = context_len - GRAM_SIZE - draft_count"
-        in dflash_ngram
-        and "candidate_token == suffix_token" in dflash_ngram
-        and "return bool(torch.all(found_out[:batch_size]).item())"
+        "def _insert_hash_index(" in dflash_ngram
+        and "tl.atomic_cas(" in dflash_ngram
+        and "MAX_HASH_PROBES" in dflash_ngram
+        and "indexed_token == suffix_token" in dflash_ngram
+        and "direct_token == suffix_token" in dflash_ngram,
+        "GPU prompt index uses bounded hashing and token-checks every hit",
+    )
+    check(
+        "for order_idx in range(NUM_ORDERS):" in dflash_ngram
+        and "return bool(torch.all(selected_found[:batch_size]).item())"
         in dflash_ngram,
-        "n-gram kernel requires an exact full-chain hit for every request",
+        "prompt lookup prioritizes configured orders and requires every row to hit",
     )
 
 
@@ -260,35 +267,52 @@ def validate_dflash_ngram_reference() -> None:
         argument.annotation = None
     isolated = ast.Module(body=[function], type_ignores=[])
     ast.fix_missing_locations(isolated)
-    namespace: dict[str, object] = {}
+    namespace: dict[str, object] = {"_MAX_GRAM_SIZE": 16}
     exec(compile(isolated, "dflash_ngram_reference", "exec"), namespace)
     propose = namespace["find_ngram_continuation_reference"]
 
     repeating = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3]
     check(
-        propose(repeating, 4, draft_token_num=8, gram_size=4)
+        propose(repeating, 4, draft_token_num=8, gram_sizes=(8, 6, 4))
         == [1, 2, 3, 4, 1, 2, 3],
-        "n-gram reference copies a complete observed continuation",
+        "prompt lookup falls through to a complete shorter-order continuation",
+    )
+    priority = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        5, 6, 7, 8, 20, 21, 22,
+        1, 2, 3, 4, 5, 6, 7,
+    ]
+    check(
+        propose(priority, 8, draft_token_num=4, gram_sizes=(8, 4))
+        == [9, 10, 11]
+        and propose(priority, 8, draft_token_num=4, gram_sizes=(4, 8))
+        == [20, 21, 22],
+        "prompt lookup honors explicit longest-to-shortest order priority",
     )
     check(
-        propose(range(1, 12), 12, draft_token_num=8, gram_size=4) is None,
-        "n-gram reference misses unique suffixes",
+        propose(range(1, 12), 12, draft_token_num=8, gram_sizes=(4,)) is None,
+        "prompt lookup misses unique suffixes",
     )
     check(
-        propose([1, 2, 3, 4, 1, 2, 3], 4, draft_token_num=8, gram_size=4)
+        propose(
+            [1, 2, 3, 4, 1, 2, 3],
+            4,
+            draft_token_num=8,
+            gram_sizes=(4,),
+        )
         is None,
-        "n-gram reference falls back when history cannot fill the draft",
+        "prompt lookup falls back when history cannot fill the draft",
     )
     check(
         propose(
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3],
             4,
             draft_token_num=4,
-            gram_size=4,
+            gram_sizes=(4,),
             window_size=8,
         )
         is None,
-        "n-gram reference does not read beyond its bounded history window",
+        "prompt lookup does not read beyond its bounded history window",
     )
 
 def validate_mhc_dispatch_contract() -> None:
@@ -718,6 +742,19 @@ def validate_runpod_b300_profile() -> None:
         and "--radix-eviction-policy lru" in boot
         and "--mamba-radix-cache-strategy extra_buffer" in boot,
         "B300 launcher preserves radix and hybrid-state prefix caching",
+    )
+    check(
+        launch_profile["baseline_environment"]["SGLANG_DFLASH_NGRAM_WINDOW"]
+        == "8192"
+        and launch_profile["baseline_environment"][
+            "SGLANG_DFLASH_NGRAM_GRAM_SIZES"
+        ]
+        == "8,6,4"
+        and "SGLANG_DFLASH_NGRAM_WINDOW=${SGLANG_DFLASH_NGRAM_WINDOW:-8192}"
+        in boot
+        and "SGLANG_DFLASH_NGRAM_GRAM_SIZES=${SGLANG_DFLASH_NGRAM_GRAM_SIZES:-8,6,4}"
+        in boot,
+        "B300 launcher exposes the coding prompt lookup window and order priority",
     )
     for flag, expected in required_pairs.items():
         check(f"{flag} {expected}" in boot, f"B300 launch sets {flag}={expected}")
