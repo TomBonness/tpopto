@@ -88,6 +88,78 @@ Completed live trial (2026-09-03 UTC):
 4. Width 8 remains the production profile. Widths 16 and 64 were not run because width 32 lost decisively.
 5. Profile the width-eight configuration around one useful request only if more kernel work is justified. The next profile should decide among TP4 collectives, KDA recurrent geometry, mHC post/pre fusion, and the NoPE DSA bridge; do not change several paths in one run.
 
+### Ranked next kernel experiments
+
+The production launcher stays unchanged until an isolated candidate wins. All
+measurements use the existing deterministic width-eight request, normalize
+kernel time by accepted token, and record decode tokens/s, TTFT, average
+acceptance, peak memory, and the named kernel family's GPU time. Keep a change
+only when output remains coherent, acceptance does not materially regress, the
+targeted kernel time falls, and end-to-end decode improves by at least 3%.
+
+Risk-adjusted run order:
+
+1. **Capture one width-eight kernel timeline.** Attribute target-verify time to
+   KDA convolution/recurrent updates, mHC pre/post kernels, DSA top-k and
+   metadata, the NoPE sparse-MLA bridge, MoE, and NCCL. This is a measurement
+   run, not another draft-width sweep.
+2. **Enable speculative ReplaySSM alone** with
+   `--enable-linear-replayssm-spec`. The pinned SGLang path explicitly supports
+   DFLASH, a linear top-k-one chain, and Triton KDA verification. It stores raw
+   `(v, k, g, beta)` history and folds only the accepted prefix instead of
+   snapshotting the full recurrent state for every draft token. For 34 local
+   KDA states, 16 heads, and a 128x128 state, eight snapshots represent an
+   estimated 136-272 MiB per target pass and rank at BF16-FP32. Record the
+   automatically selected FP32 state dtype and resulting memory headroom.
+3. **Remove `SGLANG_OPT_USE_TOPK_V2=0` alone.** The pinned decode-shaped v2 path
+   accepts the exact top-k 2048 geometry and fuses selection with the physical
+   page-table transform, avoiding the page-size-one table on that path.
+4. **Enable KPool metadata fusion alone** with
+   `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1`. The bundled backend's
+   validated envelope exactly matches index-kpool 4, page size 64, and top-k
+   2048. If it wins, separately enable
+   `SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1`; KPool fusion is required
+   before in-graph verify metadata is eligible for this model.
+
+Profile-gated implementation queue:
+
+1. **Native SM120 NoPE sparse MLA.** Specialize the existing FlashInfer kernel
+   for H512 queries, 528-byte FP8 cache rows, zero RoPE, and top-k 2052. The
+   current compatibility bridge pads the four-entry tail to 128, materializes
+   2,176 H576 rows per query, launches attention twice, and merges two outputs
+   through LSE. At eight verify rows across 11 full-attention layers, the
+   temporary compact-cache writes alone are about 120 MiB per pass and rank.
+   A native specialization removes the Q padding, compaction, second attention
+   launch, and pointwise merge.
+2. **Use the existing `mhc_fused_post_pre` at the attention-to-MLP boundary.**
+   The pinned helper already combines `hc_post` with the following pre-norm
+   projection for small token counts, but `MHCLayerCommunicator.prepare_mlp`
+   still calls the two paths separately. Wiring it there removes one launch in
+   each of 45 layers. Benchmark MLP-to-next-attention fusion separately because
+   it needs cross-layer state plumbing.
+3. **Fuse DFlash capture contraction.** Replace
+   `(hidden_states + residual)` followed by `hc_contract` with one reduction
+   kernel at the five captured hidden-state layers. This removes one launch and
+   the temporary 4H tensor at each capture without changing the draft adapter's
+   H-sized input.
+4. **Fuse the width-eight KDA verify chain.** A specialized kernel can combine
+   the causal convolution update, recurrent KDA verify update, and gated
+   RMSNorm while retaining the exact `lower_bound=-5.0` math. The current chain
+   materializes its intermediate tensors and uses three launches in each of 34
+   KDA layers; a one-launch path can remove up to 68 launches per target pass.
+5. **Microbenchmark TP4 collectives before changing them.** The machine is PHB
+   PCIe without NVLink, so SGLang deliberately leaves its greater-than-two-GPU
+   custom all-reduce disabled. Compare NCCL against one-shot peer all-reduce at
+   the actual width-eight H4096 tensors only if the timeline puts collectives
+   among the two largest costs; never force the override from topology alone.
+
+Two tempting changes are intentionally below this queue. FlashInfer MoE fused
+finalization is already enabled by default, while its CuteDSL MoE generator
+excludes SM120. Removing KDA's stale `lower_bound is None` packed-decode guard
+is a valid non-speculative decode optimization because the Triton packed kernel
+already accepts `lower_bound`, but DFlash target verification uses the separate
+`target_verify` path, so it does not attack the measured steady-state hot path.
+
 Prepared files:
 
 - `verda-dflash256-manifest.json` — revisions, hashes, retained Verda resource IDs, and launch contract
