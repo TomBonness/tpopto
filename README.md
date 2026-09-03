@@ -59,3 +59,63 @@ openai.chat.completions.create(
 ## Provenance
 
 `manifest.json` records the base digest, model revision, hashes of the four core checkpoint metadata files, and sha256 of every baked patch. It is a configuration lock, not a replacement for validating all 120 model shards after transfer.
+
+## Verda DFlash2 256K profile
+
+The width-eight profile has been verified end to end on 4× RTX PRO 6000 SM120. One useful coding request (45 prompt tokens, 125 completion tokens) measured 981.2 ms TTFT and 464.17 output tokens/s. No synthetic attractor or width sweep was run.
+
+Lock points:
+
+- Target checkpoint: `LibertAIDAI/GLM-5.3-Flash-NVFP4` @ `caca4e6a4ebbd66f159d3d2fc256683fd6e27177`
+- Draft checkpoint: `incoai/GLM-5.3-Flash-DFlash2` @ `bf582e4eacc1810f76656d1811693ff6c6737d2a` (2,342,169,800-byte weights)
+- Generic DFlash implementation: SGLang `033446bb05f35c0943aed2750c443077ffc0b92c`
+- GLM hidden-state adapter: upstream PR `#36708`, ported into the bundled model patch with the reported `residual is None` guard
+- Context/token pool: 262,144 / 262,144
+- TP/EP: 4 / 4
+- Concurrency: one request
+- DFlash2 block: eight draft tokens by default; the launcher accepts only the explicit 8, 16, 32, or 64 candidates through `DFLASH_DRAFT_TOKENS`
+- Prefill chunk: 4,096; static memory fraction: 0.85
+
+The bundled GLM patch restores the upstream fused KDA projection path when ModelOpt explicitly excludes both fused projection names from quantization, as this checkpoint does. Each of the 34 KDA layers now uses one merged BF16 projection and one batched BF16 projection instead of six separate projection calls: 136 fewer GEMM calls per target-model pass. The fused path loaded on SM120 and produced a coherent Python LRU-cache implementation.
+
+Draft width remains a separate startup profile; DFlash does not support adaptive width. The live comparison selected width 8: it decoded at 428.56 tokens/s with a 6.8 average accepted length, while width 32 decoded at 314.70 tokens/s and did not expose acceptance telemetry after its single request. Width 32 was 26.57% slower, so `/etc/sglang-glm.env`, the launcher default, and the manifest all retain `DFLASH_DRAFT_TOKENS=8`.
+
+Completed live trial (2026-09-03 UTC):
+
+1. All four RTX PRO 6000 GPUs reported `PHB` topology with no NVLink, and every directed CUDA peer-read check passed. SGLang's TP4 PCIe custom-all-reduce guard remains unchanged; NCCL is used.
+2. Width 8 loaded the fused KDA projections and produced coherent output at 428.56 decode tokens/s with 118.69 ms TTFT.
+3. Width 32 produced coherent output at 314.70 decode tokens/s with 439.76 ms TTFT. It failed the required 5% gain by a wide margin.
+4. Width 8 remains the production profile. Widths 16 and 64 were not run because width 32 lost decisively.
+5. Profile the width-eight configuration around one useful request only if more kernel work is justified. The next profile should decide among TP4 collectives, KDA recurrent geometry, mHC post/pre fusion, and the NoPE DSA bridge; do not change several paths in one run.
+
+Prepared files:
+
+- `verda-dflash256-manifest.json` — revisions, hashes, retained Verda resource IDs, and launch contract
+- `stage-dflash2.py` — resumable pinned download with full SHA-256 verification
+- `stage-dflash2.sh` — runs the stager using the already-cached SGLang image and refuses an implicit large image pull
+- `verda-dflash256-boot.sh` — validates both checkpoints and every runtime patch before starting SGLang
+- `sglang-glm-dflash256.service` — replacement systemd unit
+- `benchmark-minimal.py` — exactly one useful coding request, capped at 256 completion tokens, plus a non-generating `/server_info` read for active width and optional average acceptance
+
+To avoid billing four GPUs during preparation, first boot the retained OS volume on Verda's `CPU.4V.16G` type, attach the retained model volume, copy this bundle to `/workspace/deploy`, run `stage-dflash2.sh`, install the prepared systemd unit, and delete the CPU VM without `--with-volumes`. The exact location, instance types, volume IDs, and SSH key ID are locked in `verda-dflash256-manifest.json`.
+
+After recreating the four-GPU VM from those two volumes:
+
+```bash
+install -m 0644 /workspace/deploy/sglang-glm-dflash256.service /etc/systemd/system/sglang-glm.service
+systemctl daemon-reload
+systemctl enable --now sglang-glm.service
+```
+
+Run only the single prepared benchmark after `/health` becomes ready:
+
+```bash
+set -a
+. /etc/sglang-glm.env
+set +a
+python3 /workspace/deploy/benchmark-minimal.py
+```
+
+The benchmark does not restart the server for a baseline, generate a repetitive attractor, sweep draft widths, or synthesize a long prompt. Measure only one explicitly selected candidate per restart.
+
+The draft checkpoint is licensed `CC-BY-NC-ND-4.0`; review that license before commercial use.

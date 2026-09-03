@@ -1,0 +1,92 @@
+{
+  "schema": "glm53-flash-verda-dflash256/v1",
+  "base_image": "lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd50034ca60c6e6c86b8e36a73675d261f6a5eb71197796aee5175409290",
+  "sglang": {
+    "revision": "033446bb05f35c0943aed2750c443077ffc0b92c",
+    "dflash_glm_adapter_pr": 36708,
+    "dflash_glm_adapter_head": "2d4b6acea720f5eb5a2b2c269f1cc9dcbc8b10c0",
+    "dflash_glm_adapter_merge": "c4d5d45e506dcd978a65661a503eda1a272c39a4",
+    "adapter_note": "The bundled GLM patch ports PR 36708 onto the pinned image and adds the reported residual-is-None guard. Generic DFLASH support already exists at the pinned SGLang revision."
+  },
+  "target_model": {
+    "repository": "LibertAIDAI/GLM-5.3-Flash-NVFP4",
+    "revision": "caca4e6a4ebbd66f159d3d2fc256683fd6e27177",
+    "path": "/workspace/models/GLM-5.3-Flash-NVFP4",
+    "file_count": 131,
+    "model_shards": 120,
+    "total_bytes": 194701812547,
+    "hashes": {
+      "config.json": "5db46f44956e4a8a0cc8ed54b6d77bf99dd7c1ec90c58975d1952560768513d5",
+      "model.safetensors.index.json": "0a5cb10ccc9bfdfe7a4e857e69fb6eea229cc98343986db27ca95e4266e1a2d9",
+      "chat_template.jinja": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891",
+      "generation_config.json": "230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f",
+      "model-input-scales.safetensors": "b812b4d7df15dedb06e74defa6380fecba61d45b8c117fb42eda1443430d2a4a"
+    }
+  },
+  "draft_model": {
+    "repository": "incoai/GLM-5.3-Flash-DFlash2",
+    "revision": "bf582e4eacc1810f76656d1811693ff6c6737d2a",
+    "path": "/workspace/models/GLM-5.3-Flash-DFlash2",
+    "license": "CC-BY-NC-ND-4.0",
+    "files": {
+      "config.json": {
+        "bytes": 1273,
+        "sha256": "c4aeac0101196a6e26705b34c45230bcd0c7c68ee2d2d1efdb242087f3712573"
+      },
+      "model.safetensors": {
+        "bytes": 2342169800,
+        "sha256": "b038e1d9d1e7833fa3880c2c0135ba9b673013f03da1b29fb831931584759dac"
+      }
+    },
+    "native_block_size": 8,
+    "sliding_window": 2048,
+    "target_layer_ids": [5, 14, 24, 33, 42]
+  },
+  "profile": {
+    "served_model_name": "glm-5.3-flash",
+    "tensor_parallel_size": 4,
+    "expert_parallel_size": 4,
+    "context_length": 262144,
+    "max_total_tokens": 262144,
+    "max_running_requests": 1,
+    "chunked_prefill_size": 4096,
+    "max_prefill_tokens": 4096,
+    "mem_fraction_static": 0.85,
+    "mamba_full_memory_ratio": 2,
+    "kv_cache_dtype": "fp8_e4m3",
+    "dflash_draft_tokens": 8,
+    "dflash_draft_window_size": 2048,
+    "cuda_graph_max_batch_size": 1
+  },
+  "verda": {
+    "location": "FIN-02",
+    "gpu_instance_type": "4RTXPRO6000.120V",
+    "staging_instance_type": "CPU.4V.16G",
+    "staging_price_per_hour_usd": 0.048,
+    "os_volume_id": "c5f534a6-d893-4d3e-be42-681b80fa56e8",
+    "model_volume_id": "b83dff32-f8a3-4d74-a75a-24e3b51c5fd6",
+    "ssh_key_id": "0921111a-4ab7-4723-b9c4-5bdf844b2b89"
+  },
+  "benchmark": {
+    "default_request_count": 1,
+    "max_completion_tokens": 256,
+    "reasoning_effort": "low",
+    "note": "One useful coding request only. No automatic baseline restart, long-context sweep, or attractor benchmark.",
+    "latest_live_trial": {
+      "timestamp_utc": "2026-09-03",
+      "winner_draft_tokens": 8,
+      "width_8": {
+        "decode_tokens_per_second": 428.56,
+        "ttft_ms": 118.69,
+        "avg_spec_accept_length": 6.8,
+        "coherent": true
+      },
+      "width_32": {
+        "decode_tokens_per_second": 314.7,
+        "ttft_ms": 439.76,
+        "avg_spec_accept_length": null,
+        "coherent": true
+      }
+    }
+  }
+}

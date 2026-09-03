@@ -17,7 +17,7 @@
     {
       "source": "patches/sglang-glm5_next-debug.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/models/glm5_next.py",
-      "sha256": "aeb9eb145958644de548b15031842c8b8c3daac6daa73139d5c676a7a2b211da"
+      "sha256": "869e5374d58fb241dee7f9d5ab080d5f847e0aa74236885e4d0672f971eca9fb"
     },
     {
       "source": "patches/sglang-deepseek_nextn-glm53.py",

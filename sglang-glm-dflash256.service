@@ -1,0 +1,19 @@
+[Unit]
+Description=GLM-5.3-Flash NVFP4 SGLang DFlash2 TP4 256K
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/sglang-glm.env
+ExecStartPre=-/usr/bin/docker rm -f sglang-glm
+ExecStart=/usr/bin/docker run --rm --name sglang-glm --gpus all --ipc=host --network=host --env-file=/etc/sglang-glm.env -v /workspace:/workspace --entrypoint /bin/bash lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd50034ca60c6e6c86b8e36a73675d261f6a5eb71197796aee5175409290 /workspace/deploy/verda-dflash256-boot.sh
+ExecStop=/usr/bin/docker stop --time 90 sglang-glm
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
