@@ -6,17 +6,47 @@ MODEL=/workspace/models/GLM-5.3-Flash-NVFP4
 DRAFT=/workspace/models/GLM-5.3-Flash-DFlash2
 MANIFEST=$DEPLOY/verda-dflash256-manifest.json
 DFLASH_DRAFT_TOKENS=${DFLASH_DRAFT_TOKENS:-8}
+DFLASH_PERF_EXPERIMENT=${DFLASH_PERF_EXPERIMENT:-baseline}
 
 case "$DFLASH_DRAFT_TOKENS" in
   8|16|32|64) ;;
   *) echo "DFLASH_DRAFT_TOKENS must be one of 8, 16, 32, or 64" >&2; exit 2 ;;
+esac
+
+EXPERIMENT_ARGS=()
+export SGLANG_OPT_USE_TOPK_V2=0
+export SGLANG_DSA_FUSE_TOPK=1
+export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=0
+export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=0
+export SGLANG_GLM53_FUSE_MHC_POST_PRE=0
+case "$DFLASH_PERF_EXPERIMENT" in
+  baseline) ;;
+  replayssm-spec)
+    EXPERIMENT_ARGS+=(--enable-linear-replayssm-spec)
+    ;;
+  topk-v2)
+    export SGLANG_OPT_USE_TOPK_V2=1
+    ;;
+  kpool-metadata)
+    export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1
+    ;;
+  ingraph-metadata)
+    export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1
+    export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1
+    ;;
+  mhc-post-pre)
+    export SGLANG_GLM53_FUSE_MHC_POST_PRE=1
+    ;;
+  *)
+    echo "DFLASH_PERF_EXPERIMENT must be baseline, replayssm-spec, topk-v2, kpool-metadata, ingraph-metadata, or mhc-post-pre" >&2
+    exit 2
+    ;;
 esac
 : "${SGLANG_API_KEY:?SGLANG_API_KEY must be set}"
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export TORCH_CUDA_ARCH_LIST=12.0a
 export FLASHINFER_CUDA_ARCH_LIST=12.0f
-export SGLANG_OPT_USE_TOPK_V2=0
 export SGLANG_OPT_USE_TILELANG_INDEXER=1
 export SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1
 export SGLANG_OPT_DEEPGEMM_HC_PRENORM=0
@@ -102,6 +132,6 @@ COMMON=(
   --port 8000
 )
 
-echo DFLASH256_PRODUCTION_STARTING
-exec python3 -m sglang.launch_server "${COMMON[@]}" \
-  >> /workspace/dflash256-production.log 2>&1
+echo "DFLASH256_STARTING experiment=$DFLASH_PERF_EXPERIMENT draft_tokens=$DFLASH_DRAFT_TOKENS"
+exec python3 -m sglang.launch_server "${COMMON[@]}" "${EXPERIMENT_ARGS[@]}" \
+  >> "/workspace/dflash256-${DFLASH_PERF_EXPERIMENT}.log" 2>&1

@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -11,6 +12,9 @@ from sglang.kernels.ops.attention.fla.fused_norm_gate import FusedRMSNormGated
 from sglang.kernels.ops.layernorm.mhc import hc_contract
 from sglang.kernels.ops.layernorm.mhc import hc_post as _hc_post_fn
 from sglang.kernels.ops.layernorm.mhc import hc_pre as _hc_pre_fn
+from sglang.kernels.ops.layernorm.mhc import (
+    mhc_fused_post_pre as _mhc_fused_post_pre_fn,
+)
 from sglang.srt.batch_overlap.two_batch_overlap import (
     model_forward_maybe_tbo,
 )
@@ -775,6 +779,11 @@ class Glm5NextDecoderLayer(nn.Module):
                 hc_attn_pre=self.hc_attn_pre,
                 hc_ffn_pre=self.hc_ffn_pre,
                 hc_post=self.hc_post,
+                hc_fused_post_pre=(
+                    self.hc_fused_post_pre
+                    if os.environ.get("SGLANG_GLM53_FUSE_MHC_POST_PRE", "0") == "1"
+                    else None
+                ),
             )
             if self.dsa_enable_prefill_cp:
                 self.layer_communicator = MHCHybridDSACPLayerCommunicator(
@@ -828,6 +837,42 @@ class Glm5NextDecoderLayer(nn.Module):
             hidden_states,
             out_norm_weight,
             out_norm_eps,
+        )
+
+    def hc_fused_post_pre(
+        self,
+        hidden_states,
+        residual,
+        h_res,
+        h_post,
+        out_norm_weight,
+        out_norm_eps,
+    ):
+        """Fuse attention mHC post with FFN mHC pre for this decoder layer."""
+        num_tokens, hidden_size = hidden_states.shape
+        hc_mult = self.config.hc_mult
+        residual, h_post, h_res, layer_input = _mhc_fused_post_pre_fn(
+            x=hidden_states,
+            residual=residual.view(num_tokens, hc_mult, hidden_size),
+            post_layer_mix=h_post.view(num_tokens, hc_mult, 1),
+            comb_res_mix=h_res.view(num_tokens, hc_mult, hc_mult),
+            fn=self.hc_ffn_fn,
+            hc_scale=self.hc_ffn_scale,
+            hc_base=self.hc_ffn_base,
+            rms_eps=self.config.rms_norm_eps,
+            hc_pre_eps=self.config.hc_eps,
+            hc_sinkhorn_eps=self.config.hc_eps,
+            hc_post_mult_value=2.0,
+            sinkhorn_repeat=self.config.hc_sinkhorn_iters,
+            norm_weight=out_norm_weight,
+            norm_eps=out_norm_eps,
+        )
+        return (
+            layer_input,
+            residual.view(num_tokens, -1),
+            h_res.view(num_tokens, hc_mult * hc_mult),
+            h_post.view(num_tokens, hc_mult),
+            out_norm_weight is not None,
         )
 
     def hc_post(self, hidden_states, residual, h_res, h_post):

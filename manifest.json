@@ -17,7 +17,7 @@
     {
       "source": "patches/sglang-glm5_next-debug.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/models/glm5_next.py",
-      "sha256": "869e5374d58fb241dee7f9d5ab080d5f847e0aa74236885e4d0672f971eca9fb"
+      "sha256": "82ea58a628ec8def1735afacb815f478d160b267f6fa316ba932624d5356faf7"
     },
     {
       "source": "patches/sglang-deepseek_nextn-glm53.py",
@@ -43,6 +43,11 @@
       "source": "patches/sglang-dsa_backend-glm53.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/dsa_backend.py",
       "sha256": "1b786b161e9279b707f6bc24cb31b835bad1fc6a55f12d80dda47ee071636bc7"
+    },
+    {
+      "source": "patches/sglang-communicator_mhc-glm53.py",
+      "target": "/sgl-workspace/sglang/python/sglang/srt/layers/communicator_mhc.py",
+      "sha256": "74f88e7939839d92f1b29321d17e7cdadefa78eb3bd1595b40241883c831f63c"
     }
   ],
   "hardware": {
@@ -79,6 +84,10 @@
       "TORCH_CUDA_ARCH_LIST": "12.0a",
       "FLASHINFER_CUDA_ARCH_LIST": "12.0f",
       "SGLANG_OPT_USE_TOPK_V2": "0",
+      "SGLANG_DSA_FUSE_TOPK": "1",
+      "SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION": "0",
+      "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA": "0",
+      "SGLANG_GLM53_FUSE_MHC_POST_PRE": "0",
       "SGLANG_OPT_USE_TILELANG_INDEXER": "1",
       "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "1",
       "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",

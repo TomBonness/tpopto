@@ -13,6 +13,15 @@ import urllib.request
 PROMPT = """Implement a compact Python LRUCache class with get and put methods.
 Use only the standard library, make both operations O(1), and return only the code."""
 
+PERF_EXPERIMENTS = {
+    "baseline",
+    "replayssm-spec",
+    "topk-v2",
+    "kpool-metadata",
+    "ingraph-metadata",
+    "mhc-post-pre",
+}
+
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -23,10 +32,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--model", default="glm-5.3-flash")
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=180)
-    parser.add_argument(
-        "--output",
-        default="/workspace/dflash256-minimal-benchmark.json",
-    )
+    parser.add_argument("--output", default=None)
     return parser.parse_args()
 
 
@@ -38,6 +44,13 @@ def main() -> None:
     api_key = os.environ.get("SGLANG_API_KEY")
     if not api_key:
         raise RuntimeError("SGLANG_API_KEY must be set")
+
+    perf_experiment = os.environ.get("DFLASH_PERF_EXPERIMENT", "baseline")
+    if perf_experiment not in PERF_EXPERIMENTS:
+        raise RuntimeError(f"unsupported DFLASH_PERF_EXPERIMENT: {perf_experiment}")
+    output_path = args.output
+    if output_path is None:
+        output_path = f"/workspace/dflash256-{perf_experiment}-benchmark.json"
 
     payload = json.dumps(
         {
@@ -121,6 +134,7 @@ def main() -> None:
     result = {
         "verified": bool("".join(content) or "".join(reasoning)),
         "request_count": 1,
+        "dflash_perf_experiment": perf_experiment,
         "prompt": "compact Python LRU cache",
         "max_completion_tokens": args.max_tokens,
         "ttft_ms": round((first_token_at - started) * 1000, 2),
@@ -137,10 +151,10 @@ def main() -> None:
         raise RuntimeError(f"invalid generation result: {result}")
 
     encoded = json.dumps(result, indent=2) + "\n"
-    if args.output:
+    if output_path:
         from pathlib import Path
 
-        output = Path(args.output)
+        output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(encoded)
     print(encoded, end="")

@@ -58,6 +58,39 @@
     "dflash_draft_window_size": 2048,
     "cuda_graph_max_batch_size": 1
   },
+  "performance_experiments": {
+    "environment_variable": "DFLASH_PERF_EXPERIMENT",
+    "default": "baseline",
+    "one_candidate_per_restart": true,
+    "minimum_decode_improvement_percent": 3,
+    "candidates": {
+      "replayssm-spec": {
+        "server_argument": "--enable-linear-replayssm-spec"
+      },
+      "topk-v2": {
+        "environment": {
+          "SGLANG_OPT_USE_TOPK_V2": "1"
+        }
+      },
+      "kpool-metadata": {
+        "environment": {
+          "SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION": "1"
+        }
+      },
+      "ingraph-metadata": {
+        "requires": ["kpool-metadata"],
+        "environment": {
+          "SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION": "1",
+          "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA": "1"
+        }
+      },
+      "mhc-post-pre": {
+        "environment": {
+          "SGLANG_GLM53_FUSE_MHC_POST_PRE": "1"
+        }
+      }
+    }
+  },
   "verda": {
     "location": "FIN-02",
     "gpu_instance_type": "4RTXPRO6000.120V",

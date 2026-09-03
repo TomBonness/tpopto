@@ -121,6 +121,29 @@ Risk-adjusted run order:
    `SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1`; KPool fusion is required
    before in-graph verify metadata is eligible for this model.
 
+The bundle now exposes the safe-to-launch candidates through one selector,
+`DFLASH_PERF_EXPERIMENT`. Allowed values are `baseline`, `replayssm-spec`,
+`topk-v2`, `kpool-metadata`, `ingraph-metadata`, and `mhc-post-pre`. The last
+candidate wires SGLang's existing `mhc_fused_post_pre` helper into GLM's
+attention-to-MLP boundary; it is isolated behind an environment gate and the
+baseline retains the original separate post/pre calls. The in-graph
+metadata candidate enables its required KPool fusion in the same profile.
+
+On the GPU VM, select and restart one candidate atomically:
+
+```bash
+python3 /workspace/deploy/select-dflash-experiment.py baseline --restart
+# After the baseline result, replace baseline with exactly one candidate above.
+```
+
+Each restart writes its server output to
+`/workspace/dflash256-<experiment>.log`. After `/health` returns 200, source
+`/etc/sglang-glm.env` and run `benchmark-minimal.py` once. Its JSON records
+`dflash_perf_experiment`, active draft width, acceptance, TTFT, and decode
+throughput, preventing results from being attributed to the wrong candidate.
+By default each result is retained as
+`/workspace/dflash256-<experiment>-benchmark.json`.
+
 Profile-gated implementation queue:
 
 1. **Native SM120 NoPE sparse MLA.** Specialize the existing FlashInfer kernel
@@ -131,23 +154,17 @@ Profile-gated implementation queue:
    temporary compact-cache writes alone are about 120 MiB per pass and rank.
    A native specialization removes the Q padding, compaction, second attention
    launch, and pointwise merge.
-2. **Use the existing `mhc_fused_post_pre` at the attention-to-MLP boundary.**
-   The pinned helper already combines `hc_post` with the following pre-norm
-   projection for small token counts, but `MHCLayerCommunicator.prepare_mlp`
-   still calls the two paths separately. Wiring it there removes one launch in
-   each of 45 layers. Benchmark MLP-to-next-attention fusion separately because
-   it needs cross-layer state plumbing.
-3. **Fuse DFlash capture contraction.** Replace
-   `(hidden_states + residual)` followed by `hc_contract` with one reduction
-   kernel at the five captured hidden-state layers. This removes one launch and
-   the temporary 4H tensor at each capture without changing the draft adapter's
-   H-sized input.
-4. **Fuse the width-eight KDA verify chain.** A specialized kernel can combine
+2. **Fuse DFlash capture contraction into its producer.** The usual mHC
+   capture path reaches `hc_contract` with `residual=None`, so replacing only
+   the guarded add is not enough. If the trace shows this reduction, have the
+   preceding mHC post emit the H-sized average directly at the five capture
+   points; preserve the current guarded fallback for non-mHC paths.
+3. **Fuse the width-eight KDA verify chain.** A specialized kernel can combine
    the causal convolution update, recurrent KDA verify update, and gated
    RMSNorm while retaining the exact `lower_bound=-5.0` math. The current chain
    materializes its intermediate tensors and uses three launches in each of 34
    KDA layers; a one-launch path can remove up to 68 launches per target pass.
-5. **Microbenchmark TP4 collectives before changing them.** The machine is PHB
+4. **Microbenchmark TP4 collectives before changing them.** The machine is PHB
    PCIe without NVLink, so SGLang deliberately leaves its greater-than-two-GPU
    custom all-reduce disabled. Compare NCCL against one-shot peer all-reduce at
    the actual width-eight H4096 tensors only if the timeline puts collectives
@@ -166,8 +183,10 @@ Prepared files:
 - `stage-dflash2.py` — resumable pinned download with full SHA-256 verification
 - `stage-dflash2.sh` — runs the stager using the already-cached SGLang image and refuses an implicit large image pull
 - `verda-dflash256-boot.sh` — validates both checkpoints and every runtime patch before starting SGLang
+- `patches/sglang-communicator_mhc-glm53.py` — opt-in mHC attention-post/FFN-pre fusion dispatch
+- `select-dflash-experiment.py` — atomic candidate selection with optional service restart
 - `sglang-glm-dflash256.service` — replacement systemd unit
-- `benchmark-minimal.py` — exactly one useful coding request, capped at 256 completion tokens, plus a non-generating `/server_info` read for active width and optional average acceptance
+- `benchmark-minimal.py` — exactly one useful coding request, capped at 256 completion tokens, plus candidate identity, active width, and optional average acceptance
 
 To avoid billing four GPUs during preparation, first boot the retained OS volume on Verda's `CPU.4V.16G` type, attach the retained model volume, copy this bundle to `/workspace/deploy`, run `stage-dflash2.sh`, install the prepared systemd unit, and delete the CPU VM without `--with-volumes`. The exact location, instance types, volume IDs, and SSH key ID are locked in `verda-dflash256-manifest.json`.
 

@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import json
 import re
 import sys
+import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parent
 SGLANG_REV = "033446bb05f3"
@@ -119,6 +123,7 @@ def validate_upstream_interfaces() -> None:
     check("class MHCLayerCommunicator(LayerCommunicator):" in mhc, "MHC communicator inherits the prefetch hook")
     check("def should_use_reduce_scatter(" in mhc, "MHC communicator provides reduce-scatter decision hook")
     check("def hc_contract(" in mhc_ops, "pinned SGLang exports the DFlash mHC contraction")
+    check("def mhc_fused_post_pre(" in mhc_ops, "pinned SGLang exports fused mHC post/pre")
     check("def is_kda_layer(" in glm_config, "GLM config provides KDA layer classification")
     check("def full_attention_layer_ids(" in glm_config, "GLM config provides full-attention layer IDs")
     check("def mamba2_cache_params(" in glm_config, "GLM config provides hybrid-state cache parameters")
@@ -147,6 +152,7 @@ def validate_patch_logic() -> None:
     flash = source("patches/sglang-flash_mla_sm120-glm53.py")
     quant = source("patches/sglang-modelopt-quant-sm120.py")
     nextn = source("patches/sglang-deepseek_nextn-glm53.py")
+    communicator_mhc = source("patches/sglang-communicator_mhc-glm53.py")
 
     check("class Glm5NextForConditionalGeneration" in model, "patched model exports the checkpoint architecture")
     check("config.is_kda_layer(layer_id)" in model, "patched decoder dispatches KDA layers from config")
@@ -157,6 +163,17 @@ def validate_patch_logic() -> None:
     check("if forward_batch.can_run_tbo and not self.dflash_capture:" in model, "DFlash capture keeps the eager layer loop")
     check("hidden_states if residual is None else hidden_states + residual" in model, "DFlash capture handles an absent residual")
     check("self.model.layers_to_capture = [val + 1 for val in layer_ids]" in model, "DFlash target layers map to completed layer outputs")
+    check(
+        "SGLANG_GLM53_FUSE_MHC_POST_PRE" in model
+        and "_mhc_fused_post_pre_fn(" in model
+        and "hc_fused_post_pre=(" in model,
+        "GLM patch gates and wires fused mHC post/pre",
+    )
+    check(
+        "hc_fused_post_pre: Optional[Callable]" in communicator_mhc
+        and "self.hc_fused_post_pre(" in communicator_mhc,
+        "MHC communicator dispatches the optional fused boundary",
+    )
     check(
         "fused_projections_are_unquantized = quant_config is None or (" in model
         and 'f"{prefix}.fused_qkvbfg_a_proj"' in model
@@ -175,6 +192,199 @@ def validate_patch_logic() -> None:
     check("flashinfer_cutlass" in quant.lower(), "ModelOpt quantization patch contains CUTLASS route")
     check("w13_input_scale" in quant and "w2_input_scale" in quant, "ModelOpt MoE registers both activation-scale tensors")
 
+def validate_mhc_dispatch_contract() -> None:
+    tree = ast.parse(
+        source("patches/sglang-communicator_mhc-glm53.py"),
+        filename="sglang-communicator_mhc-glm53.py",
+    )
+    state_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "MHCState"
+    )
+    isolated = ast.Module(body=[state_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+
+    class TorchStub:
+        Tensor = object
+
+        class nn:
+            Module = object
+
+    namespace = {
+        "Callable": Callable,
+        "Optional": Optional,
+        "dataclass": dataclass,
+        "torch": TorchStub,
+    }
+    exec(compile(isolated, "MHCState", "exec"), namespace)
+    state_type = namespace["MHCState"]
+
+    class FakeTensor:
+        shape = (1,)
+
+    calls = []
+    post_result = FakeTensor()
+
+    def hc_post(hidden_states, residual, h_res, h_post):
+        calls.append(("post", hidden_states, residual, h_res, h_post))
+        return post_result
+
+    def hc_ffn_pre(hidden_states, norm_weight, norm_eps):
+        calls.append(("pre", hidden_states, norm_weight, norm_eps))
+        return FakeTensor(), "next_h_res", "next_h_post", False
+
+    unfused = state_type(4, lambda *_: None, hc_ffn_pre, hc_post)
+    unfused.h_res = "old_h_res"
+    unfused.h_post = "old_h_post"
+    _, residual = unfused.attn_to_mlp(FakeTensor(), "old_residual")
+    check(
+        [call[0] for call in calls] == ["post", "pre"]
+        and residual is post_result
+        and unfused.h_res == "next_h_res"
+        and unfused.h_post == "next_h_post",
+        "MHC baseline preserves separate post/pre dispatch",
+    )
+
+    def fail_unfused(*_args):
+        raise AssertionError("unfused mHC callable reached from fused dispatch")
+
+    def fused(hidden_states, residual, h_res, h_post, norm_weight, norm_eps):
+        calls.append(
+            ("fused", hidden_states, residual, h_res, h_post, norm_weight, norm_eps)
+        )
+        return FakeTensor(), "fused_residual", "fused_h_res", "fused_h_post", True
+
+    fused_state = state_type(
+        4,
+        lambda *_: None,
+        fail_unfused,
+        fail_unfused,
+        hc_fused_post_pre=fused,
+    )
+    fused_state.h_res = "old_h_res"
+    fused_state.h_post = "old_h_post"
+    _, residual = fused_state.attn_to_mlp(FakeTensor(), "old_residual")
+    check(
+        calls[-1][0] == "fused"
+        and residual == "fused_residual"
+        and fused_state.h_res == "fused_h_res"
+        and fused_state.h_post == "fused_h_post",
+        "MHC candidate uses only fused post/pre dispatch",
+    )
+
+
+def validate_glm_mhc_fusion_contract() -> None:
+    tree = ast.parse(
+        source("patches/sglang-glm5_next-debug.py"),
+        filename="sglang-glm5_next-debug.py",
+    )
+    decoder = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Glm5NextDecoderLayer"
+    )
+    method = next(
+        node
+        for node in decoder.body
+        if isinstance(node, ast.FunctionDef) and node.name == "hc_fused_post_pre"
+    )
+    harness = ast.ClassDef(
+        name="FusionHarness",
+        bases=[],
+        keywords=[],
+        body=[method],
+        decorator_list=[],
+    )
+    isolated = ast.Module(body=[harness], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+
+    class FakeTensor:
+        def __init__(self, name, shape):
+            self.name = name
+            self.shape = shape
+
+        def view(self, *shape):
+            return FakeTensor(self.name, shape)
+
+    captured = {}
+
+    def fused_kernel(**kwargs):
+        captured.update(kwargs)
+        return (
+            FakeTensor("residual", (2, 4, 4096)),
+            FakeTensor("post", (2, 4, 1)),
+            FakeTensor("comb", (2, 4, 4)),
+            FakeTensor("layer", (2, 4096)),
+        )
+
+    namespace = {"_mhc_fused_post_pre_fn": fused_kernel}
+    exec(compile(isolated, "Glm5NextDecoderLayer.hc_fused_post_pre", "exec"), namespace)
+    layer = namespace["FusionHarness"]()
+
+    class Config:
+        hc_mult = 4
+        rms_norm_eps = 1e-5
+        hc_eps = 1e-6
+        hc_sinkhorn_iters = 20
+
+    layer.config = Config()
+    layer.hc_ffn_fn = "ffn_fn"
+    layer.hc_ffn_scale = "ffn_scale"
+    layer.hc_ffn_base = "ffn_base"
+    norm_weight = object()
+    result = layer.hc_fused_post_pre(
+        FakeTensor("hidden", (2, 4096)),
+        FakeTensor("old_residual", (2, 16384)),
+        FakeTensor("old_h_res", (2, 16)),
+        FakeTensor("old_h_post", (2, 4)),
+        norm_weight,
+        1e-5,
+    )
+    check(
+        [tensor.name for tensor in result[:4]]
+        == ["layer", "residual", "comb", "post"]
+        and result[4] is True
+        and captured["fn"] == "ffn_fn"
+        and captured["norm_weight"] is norm_weight
+        and captured["residual"].shape == (2, 4, 4096)
+        and captured["comb_res_mix"].shape == (2, 4, 4),
+        "GLM fused wrapper preserves communicator state ordering and shapes",
+    )
+
+
+def validate_selector_contract() -> None:
+    selector_path = ROOT / "select-dflash-experiment.py"
+    spec = importlib.util.spec_from_file_location(
+        "select_dflash_experiment", selector_path
+    )
+    assert spec is not None and spec.loader is not None
+    selector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selector)
+
+    with tempfile.TemporaryDirectory() as directory:
+        env_file = Path(directory) / "sglang.env"
+        env_file.write_text(
+            "SGLANG_API_KEY=test-value\n"
+            "DFLASH_PERF_EXPERIMENT=baseline\n"
+            "DFLASH_PERF_EXPERIMENT=topk-v2\n",
+            encoding="utf-8",
+        )
+        env_file.chmod(0o640)
+        selector.replace_experiment(env_file, "mhc-post-pre")
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+        check(
+            lines == [
+                "SGLANG_API_KEY=test-value",
+                "DFLASH_PERF_EXPERIMENT=mhc-post-pre",
+            ],
+            "experiment selector preserves secrets and replaces duplicate profile keys",
+        )
+        check(
+            env_file.stat().st_mode & 0o777 == 0o640,
+            "experiment selector preserves env-file permissions",
+        )
+
 
 def docker_cmd_tokens() -> list[str]:
     lines = source("Dockerfile").splitlines()
@@ -192,6 +402,13 @@ def docker_cmd_tokens() -> list[str]:
 
 def validate_launch_contract() -> None:
     tokens = docker_cmd_tokens()
+    dockerfile = source("Dockerfile")
+    check(
+        "COPY patches/sglang-communicator_mhc-glm53.py "
+        "/sgl-workspace/sglang/python/sglang/srt/layers/communicator_mhc.py"
+        in dockerfile,
+        "Docker image installs the mHC communicator patch",
+    )
     required_pairs = {
         "--tp-size": "4",
         "--ep-size": "4",
@@ -240,6 +457,39 @@ def validate_dflash_profile() -> None:
     check("--speculative-adaptive" not in boot, "DFlash launch does not inherit NEXTN adaptive settings")
     check("exec python3 -m sglang.launch_server" in boot, "DFlash launcher hands signals to SGLang")
 
+    experiment_contract = profile["performance_experiments"]
+    experiment_names = {
+        "baseline",
+        "replayssm-spec",
+        "topk-v2",
+        "kpool-metadata",
+        "ingraph-metadata",
+        "mhc-post-pre",
+    }
+    check(
+        experiment_contract["default"] == "baseline"
+        and experiment_contract["one_candidate_per_restart"] is True
+        and set(experiment_contract["candidates"]) == experiment_names - {"baseline"},
+        "DFlash manifest locks isolated performance candidates",
+    )
+    check(
+        "DFLASH_PERF_EXPERIMENT=${DFLASH_PERF_EXPERIMENT:-baseline}" in boot
+        and all(f"  {name})" in boot for name in experiment_names),
+        "DFlash launcher validates every performance candidate",
+    )
+    check(
+        "EXPERIMENT_ARGS+=(--enable-linear-replayssm-spec)" in boot
+        and "export SGLANG_OPT_USE_TOPK_V2=1" in boot
+        and "export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1" in boot
+        and "export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1" in boot
+        and "export SGLANG_GLM53_FUSE_MHC_POST_PRE=1" in boot,
+        "DFlash launcher maps every candidate to its kernel control",
+    )
+    check(
+        '"/workspace/dflash256-${DFLASH_PERF_EXPERIMENT}.log"' in boot,
+        "DFlash launcher separates candidate logs",
+    )
+
     stager = source("stage-dflash2.py")
     ast.parse(stager, filename="stage-dflash2.py")
     check(profile["draft_model"]["revision"] in stager, "stager pins the manifest draft revision")
@@ -257,11 +507,24 @@ def validate_dflash_profile() -> None:
     check(
         '"/server_info"' in benchmark
         and '"avg_spec_accept_length"' in benchmark
-        and '"dflash_draft_tokens"' in benchmark,
-        "minimal benchmark records active width and optional DFlash acceptance",
+        and '"dflash_draft_tokens"' in benchmark
+        and '"dflash_perf_experiment"' in benchmark,
+        "minimal benchmark records candidate, width, and acceptance",
+    )
+    check(
+        'f"/workspace/dflash256-{perf_experiment}-benchmark.json"' in benchmark,
+        "minimal benchmark retains one result per candidate",
     )
     check('default=256' in benchmark, "minimal benchmark caps completion at 256 tokens")
     check("attractor" not in benchmark.lower(), "minimal benchmark contains no attractor workload")
+
+    selector = source("select-dflash-experiment.py")
+    ast.parse(selector, filename="select-dflash-experiment.py")
+    check(
+        all(f'"{name}"' in selector for name in experiment_names)
+        and "os.replace(temporary_name, path)" in selector,
+        "experiment selector admits the manifest candidates and updates atomically",
+    )
 
     wrapper = source("stage-dflash2.sh")
     check("refusing an implicit large pull" in wrapper, "CPU stager refuses a surprise image pull")
@@ -274,6 +537,9 @@ if __name__ == "__main__":
         validate_checkpoint_contract()
         validate_upstream_interfaces()
         validate_patch_logic()
+        validate_mhc_dispatch_contract()
+        validate_glm_mhc_fusion_contract()
+        validate_selector_contract()
         validate_launch_contract()
         validate_dflash_profile()
     except Exception as error:
