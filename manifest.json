@@ -58,6 +58,21 @@
         "pull_request": 37625,
         "revision": "1436d19a9a55cb9fa0ea93e2f266a0c41ef25d0f"
       }
+    },
+    {
+      "source": "patches/sglang-environ-glm53.py",
+      "target": "/sgl-workspace/sglang/python/sglang/srt/environ.py",
+      "sha256": "366db22da2ef010cf3bed569906d0df46b407504fccc335da69f4eb363cdd55f"
+    },
+    {
+      "source": "patches/sglang-dflash_ngram-glm53.py",
+      "target": "/sgl-workspace/sglang/python/sglang/kernels/ops/speculative/dflash_ngram.py",
+      "sha256": "60fcf268044b9e215b37c2cc4c19854c6aee1b32126607c68b3157da03fe6dac"
+    },
+    {
+      "source": "patches/sglang-dflash_worker_v2-glm53.py",
+      "target": "/sgl-workspace/sglang/python/sglang/srt/speculative/dflash_worker_v2.py",
+      "sha256": "ef8df7e3a91eac3a09c92f41ff0cceb34a6a69176b3651bda9d4e1d27f3b1035"
     }
   ],
   "hardware": {
@@ -102,7 +117,10 @@
       "SGLANG_OPT_USE_TILELANG_INDEXER": "1",
       "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "1",
       "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
-      "SGLANG_OPT_FP8_WO_A_GEMM": "0"
+      "SGLANG_OPT_FP8_WO_A_GEMM": "0",
+      "SGLANG_DFLASH_NGRAM_PRIMARY": "0",
+      "SGLANG_DFLASH_NGRAM_WINDOW": "2048",
+      "SGLANG_DFLASH_NGRAM_GRAM_SIZE": "8"
     }
   },
   "validation": {

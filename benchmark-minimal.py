@@ -16,6 +16,7 @@ Use only the standard library, make both operations O(1), and return only the co
 PERF_EXPERIMENTS = {
     "baseline",
     "replayssm-spec",
+    "ngram-primary",
     "topk-v2",
     "kpool-metadata",
     "ingraph-metadata",

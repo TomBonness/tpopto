@@ -51,8 +51,8 @@ DFLASH_DRAFT_TOKENS=${DFLASH_DRAFT_TOKENS:-8}
 DFLASH_PERF_EXPERIMENT=${DFLASH_PERF_EXPERIMENT:-baseline}
 
 case "$DFLASH_DRAFT_TOKENS" in
-  8|16|32|64) ;;
-  *) echo "DFLASH_DRAFT_TOKENS must be one of 8, 16, 32, or 64" >&2; exit 2 ;;
+  4|8|16|32|64) ;;
+  *) echo "DFLASH_DRAFT_TOKENS must be one of 4, 8, 16, 32, or 64" >&2; exit 2 ;;
 esac
 
 EXPERIMENT_ARGS=()
@@ -66,10 +66,16 @@ export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=0
 export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA_DG_OUT_OF_GRAPH=0
 export SGLANG_GLM53_FUSE_MHC_POST_PRE=0
 export SGLANG_OPT_DEEPGEMM_HC_PRENORM=0
+export SGLANG_DFLASH_NGRAM_PRIMARY=0
+export SGLANG_DFLASH_NGRAM_WINDOW=2048
+export SGLANG_DFLASH_NGRAM_GRAM_SIZE=8
 case "$DFLASH_PERF_EXPERIMENT" in
   baseline) ;;
   replayssm-spec)
     EXPERIMENT_ARGS+=(--enable-linear-replayssm-spec)
+    ;;
+  ngram-primary)
+    export SGLANG_DFLASH_NGRAM_PRIMARY=1
     ;;
   topk-v2)
     export SGLANG_OPT_USE_TOPK_V2=1
@@ -102,9 +108,10 @@ case "$DFLASH_PERF_EXPERIMENT" in
     export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1
     export SGLANG_GLM53_FUSE_MHC_POST_PRE=1
     export SGLANG_OPT_DEEPGEMM_HC_PRENORM=1
+    export SGLANG_DFLASH_NGRAM_PRIMARY=1
     ;;
   *)
-    echo "DFLASH_PERF_EXPERIMENT must be baseline, replayssm-spec, topk-v2, kpool-metadata, ingraph-metadata, mhc-post-pre, deepgemm-hc-prenorm, cutedsl-paged-mqa, blackwell-dsa, or b300-cyclepack" >&2
+    echo "DFLASH_PERF_EXPERIMENT must be baseline, ngram-primary, replayssm-spec, topk-v2, kpool-metadata, ingraph-metadata, mhc-post-pre, deepgemm-hc-prenorm, cutedsl-paged-mqa, blackwell-dsa, or b300-cyclepack" >&2
     exit 2
     ;;
 esac
@@ -196,6 +203,8 @@ COMMON=(
   --max-prefill-tokens 4096
   --mem-fraction-static 0.88
   --mamba-full-memory-ratio 2
+  --radix-eviction-policy lru
+  --mamba-radix-cache-strategy extra_buffer
   --cuda-graph-max-bs-decode 1
   --speculative-algorithm DFLASH
   --speculative-draft-model-path "$DRAFT"

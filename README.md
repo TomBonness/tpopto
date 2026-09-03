@@ -2,7 +2,7 @@
 
 Locked deployment sources for the validated 4× RTX PRO 6000 Blackwell workstation profile and the retained single-B300 Runpod profile. Both use the exact `lmsysorg/sglang:glm-5.3-flash` image digest; each profile preserves its own server arguments, hardware-specific kernel controls, and checkpoint revisions.
 
-The 182 GiB checkpoint is intentionally **not** copied into the image. Compose mounts the verified local checkpoint read-only from `/mnt/llm_models/GLM-5.3-Flash-NVFP4` and reuses the writable SGLang cache at `/home/ser/.cache/sglang-glm53`. The eight compatibility/performance patches are **baked into the image** at their editable-install paths, so no bind-mounted code is needed.
+The 182 GiB checkpoint is intentionally **not** copied into the image. Compose mounts the verified local checkpoint read-only from `/mnt/llm_models/GLM-5.3-Flash-NVFP4` and reuses the writable SGLang cache at `/home/ser/.cache/sglang-glm53`. The eleven compatibility/performance patches are **baked into the image** at their editable-install paths, so no bind-mounted code is needed.
 
 ## Lock points
 
@@ -238,9 +238,18 @@ and FP8 `wo_a` GEMM. These switches are explicit so a reused pod environment
 cannot silently change the baseline. `SGLANG_OPT_DEEPGEMM_HC_PRENORM` remains
 off in the baseline and is measured separately.
 
+RadixCache is explicitly retained with LRU eviction and the hybrid KDA state uses
+the `extra_buffer` strategy. Warm tool-loop turns only benefit when the client
+resends the same tokenized system, workspace, and conversation prefix; changing
+that prefix forces a normal prefill and does not reuse stale state.
+
 Select exactly one isolated candidate with `DFLASH_PERF_EXPERIMENT`:
 
 - `replayssm-spec` — fold only the accepted recurrent-state prefix.
+- `ngram-primary` — at temperature zero, search the latest 2,048 committed
+  tokens for an exact eight-token suffix match with a complete observed
+  continuation. A hit skips the neural draft but still runs normal target
+  verification; a miss or any sampled request uses the neural draft unchanged.
 - `topk-v2` — corrected JIT radix selection plus direct plan output.
 - `kpool-metadata` — fuse the KPool metadata transforms.
 - `ingraph-metadata` — add the target-verify metadata refresh to the CUDA graph.
@@ -253,11 +262,12 @@ Select exactly one isolated candidate with `DFLASH_PERF_EXPERIMENT`:
   (`flashmla_sparse` prefill, `trtllm` decode) against the validated TileLang
   backend.
 
-`b300-cyclepack` combines every candidate above except `blackwell-dsa`. It is an
-integration experiment, is **not** production-ready, and is never selected by
-default. Promote it only after its members produce coherent output in isolation,
-do not materially reduce DFlash acceptance, reduce the targeted kernel time,
-and improve repeated end-to-end decode throughput by at least 3%.
+`b300-cyclepack` combines every candidate above except `blackwell-dsa`, including
+the guarded n-gram primary. It is an integration experiment, is **not**
+production-ready, and is never selected by default. Promote it only after its
+members produce coherent output in isolation, do not materially reduce DFlash
+acceptance, reduce the targeted kernel time, and improve repeated end-to-end
+decode throughput by at least 3%.
 
 Prepared Runpod files:
 
@@ -279,6 +289,18 @@ export DFLASH_DRAFT_TOKENS=8
 exec /workspace/deploy/runpod-b300-dflash256-boot.sh
 ```
 
+For the low-acceptance prose comparison, keep the same experiment and change
+only the draft width:
+
+```bash
+export DFLASH_PERF_EXPERIMENT=baseline
+export DFLASH_DRAFT_TOKENS=4
+exec /workspace/deploy/runpod-b300-dflash256-boot.sh
+```
+
+Width 4 is an isolated measurement, not the default. The draft model explicitly
+supports a runtime block-size override; width 8 remains the known-safe launch.
+
 The launcher copies the verified ~197 GB checkpoint from network storage to
 `/models-local` with 16 workers before loading it, then reuses
 `/workspace/cache` for SGLang, Triton, TorchInductor, CUDA, and Hugging Face
@@ -289,7 +311,7 @@ python3 /workspace/deploy/benchmark-minimal.py \
   --output /workspace/dflash256-b300-${DFLASH_PERF_EXPERIMENT}-benchmark.json
 ```
 
-Every launch re-hashes all eight runtime patches, compiles only the seven Python
+Every launch re-hashes all eleven runtime patches, compiles only the ten Python
 patches as Python, verifies both checkpoint records, and writes a candidate-
 specific server log. This makes a later B300 launch reproducible without keeping
 an idle GPU pod alive.

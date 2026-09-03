@@ -56,7 +56,7 @@ def validate_manifest_and_patches() -> None:
     check(profile["profile"]["max_running_requests"] == 1, "DFlash profile limits concurrency to one request")
     check(profile["benchmark"]["default_request_count"] == 1, "DFlash benchmark contract permits one request")
 
-    check(len(manifest["patches"]) == 8, "manifest locks all eight runtime patches")
+    check(len(manifest["patches"]) == 11, "manifest locks all eleven runtime patches")
     for patch in manifest["patches"]:
         path = ROOT / patch["source"]
         data = path.read_bytes()
@@ -170,6 +170,9 @@ def validate_patch_logic() -> None:
     quant = source("patches/sglang-modelopt-quant-sm120.py")
     nextn = source("patches/sglang-deepseek_nextn-glm53.py")
     communicator_mhc = source("patches/sglang-communicator_mhc-glm53.py")
+    dflash_ngram = source("patches/sglang-dflash_ngram-glm53.py")
+    dflash_worker = source("patches/sglang-dflash_worker_v2-glm53.py")
+    environ = source("patches/sglang-environ-glm53.py")
 
     check("class Glm5NextForConditionalGeneration" in model, "patched model exports the checkpoint architecture")
     check("config.is_kda_layer(layer_id)" in model, "patched decoder dispatches KDA layers from config")
@@ -208,6 +211,85 @@ def validate_patch_logic() -> None:
     check("if q_all is None:" in dsa and "if q_rope is not None:" in dsa, "DSA concatenates RoPE conditionally")
     check("flashinfer_cutlass" in quant.lower(), "ModelOpt quantization patch contains CUTLASS route")
     check("w13_input_scale" in quant and "w2_input_scale" in quant, "ModelOpt MoE registers both activation-scale tensors")
+    check(
+        "SGLANG_DFLASH_NGRAM_PRIMARY = EnvBool(False)" in environ
+        and "SGLANG_DFLASH_NGRAM_WINDOW = EnvInt(2048)" in environ
+        and "SGLANG_DFLASH_NGRAM_GRAM_SIZE = EnvInt(8)" in environ,
+        "n-gram proposer controls default off with bounded exact-match settings",
+    )
+    check(
+        "used_ngram = self._try_ngram_primary(" in dflash_worker
+        and "or not _is_all_greedy(batch.sampling_info)" in dflash_worker
+        and dflash_worker.index("used_ngram = self._try_ngram_primary(")
+        < dflash_worker.index("# --- 2) Target verify."),
+        "DFlash only replaces the draft proposal and retains target verification",
+    )
+    check(
+        "append_dflash_ngram_committed(" in dflash_worker
+        and "committed_tokens=out_tokens" in dflash_worker
+        and "commit_lens=commit_lens" in dflash_worker,
+        "n-gram history receives only target-verified committed tokens",
+    )
+    check(
+        "latest_full_start = context_len - GRAM_SIZE - draft_count"
+        in dflash_ngram
+        and "candidate_token == suffix_token" in dflash_ngram
+        and "return bool(torch.all(found_out[:batch_size]).item())"
+        in dflash_ngram,
+        "n-gram kernel requires an exact full-chain hit for every request",
+    )
+
+
+def validate_dflash_ngram_reference() -> None:
+    tree = ast.parse(
+        source("patches/sglang-dflash_ngram-glm53.py"),
+        filename="sglang-dflash_ngram-glm53.py",
+    )
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "find_ngram_continuation_reference"
+    )
+    function.returns = None
+    for argument in [
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ]:
+        argument.annotation = None
+    isolated = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    namespace: dict[str, object] = {}
+    exec(compile(isolated, "dflash_ngram_reference", "exec"), namespace)
+    propose = namespace["find_ngram_continuation_reference"]
+
+    repeating = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3]
+    check(
+        propose(repeating, 4, draft_token_num=8, gram_size=4)
+        == [1, 2, 3, 4, 1, 2, 3],
+        "n-gram reference copies a complete observed continuation",
+    )
+    check(
+        propose(range(1, 12), 12, draft_token_num=8, gram_size=4) is None,
+        "n-gram reference misses unique suffixes",
+    )
+    check(
+        propose([1, 2, 3, 4, 1, 2, 3], 4, draft_token_num=8, gram_size=4)
+        is None,
+        "n-gram reference falls back when history cannot fill the draft",
+    )
+    check(
+        propose(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3],
+            4,
+            draft_token_num=4,
+            gram_size=4,
+            window_size=8,
+        )
+        is None,
+        "n-gram reference does not read beyond its bounded history window",
+    )
 
 def validate_mhc_dispatch_contract() -> None:
     tree = ast.parse(
@@ -433,6 +515,24 @@ def validate_launch_contract() -> None:
         in dockerfile,
         "Docker image installs the corrected top-k v2 kernel",
     )
+    for source_path, target_path in (
+        (
+            "patches/sglang-environ-glm53.py",
+            "/sgl-workspace/sglang/python/sglang/srt/environ.py",
+        ),
+        (
+            "patches/sglang-dflash_ngram-glm53.py",
+            "/sgl-workspace/sglang/python/sglang/kernels/ops/speculative/dflash_ngram.py",
+        ),
+        (
+            "patches/sglang-dflash_worker_v2-glm53.py",
+            "/sgl-workspace/sglang/python/sglang/srt/speculative/dflash_worker_v2.py",
+        ),
+    ):
+        check(
+            f"COPY {source_path} {target_path}" in dockerfile,
+            f"Docker image installs {source_path}",
+        )
     required_pairs = {
         "--tp-size": "4",
         "--ep-size": "4",
@@ -605,6 +705,20 @@ def validate_runpod_b300_profile() -> None:
         "--speculative-algorithm": "DFLASH",
         "--speculative-draft-window-size": "2048",
     }
+    check(
+        launch_profile["dflash_draft_token_candidates"] == [4, 8, 16, 32, 64]
+        and "4|8|16|32|64)" in boot,
+        "B300 launcher exposes width four without changing the width-eight default",
+    )
+    prefix_cache = launch_profile["prefix_cache"]
+    check(
+        prefix_cache["enabled"] is True
+        and prefix_cache["eviction_policy"] == "lru"
+        and prefix_cache["mamba_strategy"] == "extra_buffer"
+        and "--radix-eviction-policy lru" in boot
+        and "--mamba-radix-cache-strategy extra_buffer" in boot,
+        "B300 launcher preserves radix and hybrid-state prefix caching",
+    )
     for flag, expected in required_pairs.items():
         check(f"{flag} {expected}" in boot, f"B300 launch sets {flag}={expected}")
     check(
@@ -633,6 +747,7 @@ def validate_runpod_b300_profile() -> None:
     contract = profile["performance_experiments"]
     isolated_names = {
         "replayssm-spec",
+        "ngram-primary",
         "topk-v2",
         "kpool-metadata",
         "ingraph-metadata",
@@ -657,6 +772,7 @@ def validate_runpod_b300_profile() -> None:
     )
     for mapping in (
         "EXPERIMENT_ARGS+=(--enable-linear-replayssm-spec)",
+        "export SGLANG_DFLASH_NGRAM_PRIMARY=1",
         "export SGLANG_OPT_USE_TOPK_V2=1",
         "export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1",
         "export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1",
@@ -714,6 +830,7 @@ if __name__ == "__main__":
         validate_checkpoint_contract()
         validate_upstream_interfaces()
         validate_patch_logic()
+        validate_dflash_ngram_reference()
         validate_mhc_dispatch_contract()
         validate_glm_mhc_fusion_contract()
         validate_selector_contract()

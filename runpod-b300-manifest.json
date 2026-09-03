@@ -68,6 +68,7 @@
     "moe_runner_backend": "flashinfer_cutedsl",
     "dflash_draft_tokens": 8,
     "dflash_draft_window_size": 2048,
+    "dflash_draft_token_candidates": [4, 8, 16, 32, 64],
     "cuda_graph_max_batch_size": 1,
     "baseline_environment": {
       "SGLANG_OPT_USE_TOPK_V2": "0",
@@ -79,7 +80,16 @@
       "SGLANG_OPT_USE_TILELANG_INDEXER": "0",
       "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "0",
       "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
-      "SGLANG_OPT_FP8_WO_A_GEMM": "1"
+      "SGLANG_OPT_FP8_WO_A_GEMM": "1",
+      "SGLANG_DFLASH_NGRAM_PRIMARY": "0",
+      "SGLANG_DFLASH_NGRAM_WINDOW": "2048",
+      "SGLANG_DFLASH_NGRAM_GRAM_SIZE": "8"
+    },
+    "prefix_cache": {
+      "enabled": true,
+      "eviction_policy": "lru",
+      "mamba_strategy": "extra_buffer",
+      "client_contract": "Resend byte-identical stable prompt prefixes across tool-loop turns."
     }
   },
   "performance_experiments": {
@@ -89,6 +99,7 @@
     "promotion_threshold_decode_gain_fraction": 0.03,
     "isolated_candidates": {
       "replayssm-spec": "Fold only the accepted prefix instead of copying full recurrent-state snapshots per draft token.",
+      "ngram-primary": "At temperature zero, skip the neural draft only when exact recent history provides the entire proposal; target verification remains authoritative.",
       "topk-v2": "Use the corrected JIT radix top-k and direct output-buffer planning.",
       "kpool-metadata": "Fuse KPool metadata transforms into device kernels.",
       "ingraph-metadata": "Replay target-verify metadata refresh inside the CUDA graph.",
@@ -101,6 +112,7 @@
       "name": "b300-cyclepack",
       "combines": [
         "replayssm-spec",
+        "ngram-primary",
         "topk-v2",
         "kpool-metadata",
         "ingraph-metadata",
