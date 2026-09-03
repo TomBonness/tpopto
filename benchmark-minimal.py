@@ -20,6 +20,10 @@ PERF_EXPERIMENTS = {
     "kpool-metadata",
     "ingraph-metadata",
     "mhc-post-pre",
+    "deepgemm-hc-prenorm",
+    "cutedsl-paged-mqa",
+    "blackwell-dsa",
+    "b300-cyclepack",
 }
 
 

@@ -18,6 +18,7 @@ export SGLANG_OPT_USE_TOPK_V2=0
 export SGLANG_DSA_FUSE_TOPK=1
 export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=0
 export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=0
+export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA_DG_OUT_OF_GRAPH=0
 export SGLANG_GLM53_FUSE_MHC_POST_PRE=0
 case "$DFLASH_PERF_EXPERIMENT" in
   baseline) ;;
@@ -72,7 +73,8 @@ for patch in base_manifest["patches"]:
     actual = hashlib.sha256(data).hexdigest()
     if actual != patch["sha256"]:
         raise RuntimeError(f"patch hash mismatch: {source}: {actual}")
-    compile(data, str(source), "exec")
+    if source.suffix == ".py":
+        compile(data, str(source), "exec")
     target = Path(patch["target"])
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)

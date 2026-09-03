@@ -1,6 +1,6 @@
 # Exact GLM-5.3-Flash-NVFP4 runtime used on the Pop!_OS 4x RTX PRO 6000 Blackwell (SM120) host.
 # The 182 GiB checkpoint is deliberately mounted by Compose instead of baked into this image.
-# The seven SM120 compatibility/performance patches are baked into the image so the bundle has no bind-mounted code.
+# The eight compatibility/performance patches are baked into the image so the bundle has no bind-mounted code.
 FROM lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd50034ca60c6e6c86b8e36a73675d261f6a5eb71197796aee5175409290
 
 LABEL org.opencontainers.image.title="GLM-5.3-Flash NVFP4 SM120 SGLang runtime" \
@@ -17,6 +17,7 @@ ENV CUDA_DEVICE_ORDER=PCI_BUS_ID \
     SGLANG_DSA_FUSE_TOPK=1 \
     SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=0 \
     SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=0 \
+    SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA_DG_OUT_OF_GRAPH=0 \
     SGLANG_GLM53_FUSE_MHC_POST_PRE=0 \
     SGLANG_OPT_USE_TILELANG_INDEXER=1 \
     SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1 \
@@ -35,6 +36,7 @@ COPY patches/sglang-modelopt-quant-sm120.py /sgl-workspace/sglang/python/sglang/
 COPY patches/sglang-flash_mla_sm120-glm53.py /sgl-workspace/sglang/python/sglang/kernels/ops/attention/flash_mla_sm120.py
 COPY patches/sglang-dsa_backend-glm53.py /sgl-workspace/sglang/python/sglang/srt/layers/attention/dsa_backend.py
 COPY patches/sglang-communicator_mhc-glm53.py /sgl-workspace/sglang/python/sglang/srt/layers/communicator_mhc.py
+COPY patches/sglang-kpool_topk_transform-glm53.cuh /sgl-workspace/sglang/python/sglang/kernels/jit/csrc/dsa/kpool_topk_transform.cuh
 
 WORKDIR /sgl-workspace
 

@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent
 SGLANG_REV = "033446bb05f3"
 HF_REV = "9e0d74e3cef17f634e84fb8e2223707e02616290"
 DFLASH_REV = "bf582e4eacc1810f76656d1811693ff6c6737d2a"
+TOPK_FIX_REV = "1436d19a9a55cb9fa0ea93e2f266a0c41ef25d0f"
 
 
 def check(condition: bool, message: str) -> None:
@@ -55,12 +56,21 @@ def validate_manifest_and_patches() -> None:
     check(profile["profile"]["max_running_requests"] == 1, "DFlash profile limits concurrency to one request")
     check(profile["benchmark"]["default_request_count"] == 1, "DFlash benchmark contract permits one request")
 
+    check(len(manifest["patches"]) == 8, "manifest locks all eight runtime patches")
     for patch in manifest["patches"]:
-        data = (ROOT / patch["source"]).read_bytes()
+        path = ROOT / patch["source"]
+        data = path.read_bytes()
         actual = hashlib.sha256(data).hexdigest()
         check(actual == patch["sha256"], f"locked hash matches {patch['source']}")
-        compile(data, patch["source"], "exec")
-        print(f"PASS: Python compiles {patch['source']}")
+        if path.suffix == ".py":
+            compile(data, patch["source"], "exec")
+            print(f"PASS: Python compiles {patch['source']}")
+        else:
+            check(path.suffix == ".cuh", f"non-Python patch is a CUDA header: {patch['source']}")
+            check(
+                b"fast_topk_cuda_tl_impl" in data and b"Overflow path" in data,
+                f"CUDA header contains the corrected radix selector: {patch['source']}",
+            )
 
 
 def validate_checkpoint_contract() -> None:
@@ -144,6 +154,13 @@ def validate_upstream_interfaces() -> None:
     check(draft["architectures"] == ["DFlash2DraftModel"], "draft checkpoint exports DFlash2")
     check(draft["dflash_config"]["block_size"] == 8, "draft checkpoint native block is eight tokens")
     check(draft["dflash_config"]["target_layer_ids"] == [5, 14, 24, 33, 42], "draft target-layer capture map is pinned")
+    topk_patch = (ROOT / "patches/sglang-kpool_topk_transform-glm53.cuh").read_bytes()
+    topk_upstream = fetch(
+        "https://raw.githubusercontent.com/ormandj/sglang/"
+        f"{TOPK_FIX_REV}/python/sglang/kernels/jit/csrc/dsa/"
+        "kpool_topk_transform.cuh"
+    )
+    check(topk_patch == topk_upstream, "top-k v2 correctness kernel matches PR 37625 exactly")
 
 
 def validate_patch_logic() -> None:
@@ -409,6 +426,13 @@ def validate_launch_contract() -> None:
         in dockerfile,
         "Docker image installs the mHC communicator patch",
     )
+    check(
+        "COPY patches/sglang-kpool_topk_transform-glm53.cuh "
+        "/sgl-workspace/sglang/python/sglang/kernels/jit/csrc/dsa/"
+        "kpool_topk_transform.cuh"
+        in dockerfile,
+        "Docker image installs the corrected top-k v2 kernel",
+    )
     required_pairs = {
         "--tp-size": "4",
         "--ep-size": "4",
@@ -531,6 +555,159 @@ def validate_dflash_profile() -> None:
     check(profile["base_image"] in wrapper, "CPU stager pins the exact cached image")
 
 
+def validate_runpod_b300_profile() -> None:
+    profile = json.loads(source("runpod-b300-manifest.json"))
+    base_manifest = json.loads(source("manifest.json"))
+    boot = source("runpod-b300-dflash256-boot.sh")
+
+    check(profile["base_image"] == base_manifest["image"], "B300 profile pins the bundle image")
+    check(
+        profile["sglang"]["revision"].startswith(SGLANG_REV),
+        "B300 profile pins the image SGLang revision",
+    )
+    topk_contract = profile["sglang"]["topk_v2_correctness_patch"]
+    topk_patch = next(
+        patch
+        for patch in base_manifest["patches"]
+        if patch["source"] == topk_contract["source"]
+    )
+    check(
+        topk_contract["revision"] == TOPK_FIX_REV
+        and topk_contract["pull_request"] == 37625
+        and topk_contract["target"] == topk_patch["target"]
+        and topk_contract["sha256"] == topk_patch["sha256"],
+        "B300 profile locks corrected top-k v2 provenance",
+    )
+
+    launch_profile = profile["profile"]
+    check(
+        launch_profile["hardware"] == "NVIDIA B300 SXM6 AC"
+        and launch_profile["cuda_arch"] == "sm_103a",
+        "Runpod profile targets B300 SM103a",
+    )
+    check(
+        launch_profile["tensor_parallel_size"] == 1
+        and launch_profile["expert_parallel_size"] == 1
+        and launch_profile["max_running_requests"] == 1,
+        "Runpod profile is single-GPU and single-request",
+    )
+    required_pairs = {
+        "--tp-size": "1",
+        "--ep-size": "1",
+        "--context-length": "131072",
+        "--max-total-tokens": "131072",
+        "--max-running-requests": "1",
+        "--chunked-prefill-size": "4096",
+        "--max-prefill-tokens": "4096",
+        "--mem-fraction-static": "0.88",
+        "--mamba-full-memory-ratio": "2",
+        "--cuda-graph-max-bs-decode": "1",
+        "--speculative-algorithm": "DFLASH",
+        "--speculative-draft-window-size": "2048",
+    }
+    for flag, expected in required_pairs.items():
+        check(f"{flag} {expected}" in boot, f"B300 launch sets {flag}={expected}")
+    check(
+        '--dsa-prefill-backend "$DSA_PREFILL_BACKEND"' in boot
+        and '--dsa-decode-backend "$DSA_DECODE_BACKEND"' in boot
+        and '--dsa-paged-mqa-logits-backend "$DSA_PAGED_MQA_LOGITS_BACKEND"'
+        in boot,
+        "B300 launcher selects isolated DSA kernel backends",
+    )
+    check(
+        "if source.suffix == \".py\":" in boot,
+        "B300 launcher compiles Python patches without compiling CUDA headers as Python",
+    )
+    check(
+        "SGLANG_OPT_USE_TILELANG_INDEXER=0" in boot
+        and "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=0" in boot
+        and "SGLANG_OPT_FP8_WO_A_GEMM=1" in boot,
+        "B300 launcher restores native SM10x defaults instead of SM120 fallbacks",
+    )
+    check(
+        "--speculative-adaptive" not in boot
+        and "exec python3 -m sglang.launch_server" in boot,
+        "B300 launcher uses fixed-width DFlash and hands signals to SGLang",
+    )
+
+    contract = profile["performance_experiments"]
+    isolated_names = {
+        "replayssm-spec",
+        "topk-v2",
+        "kpool-metadata",
+        "ingraph-metadata",
+        "mhc-post-pre",
+        "deepgemm-hc-prenorm",
+        "cutedsl-paged-mqa",
+        "blackwell-dsa",
+    }
+    integration = contract["integration_candidate"]
+    experiment_names = {"baseline", *isolated_names, integration["name"]}
+    check(
+        contract["default"] == "baseline"
+        and contract["one_candidate_per_restart"] is True
+        and set(contract["isolated_candidates"]) == isolated_names
+        and integration["production_ready"] is False,
+        "B300 manifest keeps optimized candidates isolated and non-production",
+    )
+    check(
+        "DFLASH_PERF_EXPERIMENT=${DFLASH_PERF_EXPERIMENT:-baseline}" in boot
+        and all(f"  {name})" in boot for name in experiment_names),
+        "B300 launcher validates every staged optimization candidate",
+    )
+    for mapping in (
+        "EXPERIMENT_ARGS+=(--enable-linear-replayssm-spec)",
+        "export SGLANG_OPT_USE_TOPK_V2=1",
+        "export SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1",
+        "export SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA=1",
+        "export SGLANG_GLM53_FUSE_MHC_POST_PRE=1",
+        "export SGLANG_OPT_DEEPGEMM_HC_PRENORM=1",
+        "DSA_PAGED_MQA_LOGITS_BACKEND=cutedsl",
+        "DSA_PREFILL_BACKEND=flashmla_sparse",
+        "DSA_DECODE_BACKEND=trtllm",
+    ):
+        check(mapping in boot, f"B300 launcher maps kernel control: {mapping}")
+    check(
+        'LOG=/workspace/dflash256-b300-${DFLASH_PERF_EXPERIMENT}.log' in boot,
+        "B300 launcher separates optimization logs",
+    )
+
+    stager = source("stage-runpod-b300.py")
+    ast.parse(stager, filename="stage-runpod-b300.py")
+    check(
+        'MANIFEST = json.loads((DEPLOY / "runpod-b300-manifest.json").read_text())'
+        in stager
+        and "snapshot_download(" in stager
+        and "RUNPOD_B300_MODELS_VERIFIED" in stager,
+        "Runpod stager downloads and verifies manifest-pinned checkpoints",
+    )
+    check(
+        profile["runpod"]["network_volume_id"] == "1u0a27qypv"
+        and profile["runpod"]["active_b300_pod_id"] is None
+        and profile["runpod"]["deployment_state"] == "staged-no-live-b300"
+        and profile["runpod"]["stage_verification_path"]
+        == "/workspace/runpod-b300-stage-verification.json"
+        and profile["runpod"]["resume_entrypoint"]
+        == "/workspace/deploy/runpod-b300-dflash256-boot.sh",
+        "Runpod manifest locks the staged persistent volume with no live B300",
+    )
+
+    benchmark_tree = ast.parse(source("benchmark-minimal.py"))
+    benchmark_experiments = next(
+        ast.literal_eval(node.value)
+        for node in benchmark_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PERF_EXPERIMENTS"
+            for target in node.targets
+        )
+    )
+    check(
+        experiment_names <= benchmark_experiments,
+        "minimal benchmark accepts every B300 optimization candidate",
+    )
+
+
 if __name__ == "__main__":
     try:
         validate_manifest_and_patches()
@@ -542,8 +719,9 @@ if __name__ == "__main__":
         validate_selector_contract()
         validate_launch_contract()
         validate_dflash_profile()
+        validate_runpod_b300_profile()
     except Exception as error:
         print(f"FAIL: {error}", file=sys.stderr)
         raise
     print("ALL LOCAL STATIC/INTERFACE CHECKS PASSED")
-    print("Static checks do not replace the recorded live SM120 verification.")
+    print("Static checks do not replace the recorded live SM120/B300 verification.")

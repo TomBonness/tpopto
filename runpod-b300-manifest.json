@@ -1,0 +1,163 @@
+{
+  "schema": "glm53-flash-runpod-b300-dflash256/v1",
+  "base_image": "lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd50034ca60c6e6c86b8e36a73675d261f6a5eb71197796aee5175409290",
+  "base_image_platform_digest": "sha256:a3003a95c4eb352b4b659a677f4906f23f8d510b249ab9651bc15769d703b141",
+  "sglang": {
+    "revision": "033446bb05f35c0943aed2750c443077ffc0b92c",
+    "dflash_glm_adapter_pr": 36708,
+    "dflash_glm_adapter_head": "2d4b6acea720f5eb5a2b2c269f1cc9dcbc8b10c0",
+    "dflash_glm_adapter_merge": "c4d5d45e506dcd978a65661a503eda1a272c39a4",
+    "topk_v2_correctness_patch": {
+      "repository": "ormandj/sglang",
+      "pull_request": 37625,
+      "revision": "1436d19a9a55cb9fa0ea93e2f266a0c41ef25d0f",
+      "source": "patches/sglang-kpool_topk_transform-glm53.cuh",
+      "target": "/sgl-workspace/sglang/python/sglang/kernels/jit/csrc/dsa/kpool_topk_transform.cuh",
+      "sha256": "f197e91a989076f776bfb45262b2d77a5b7447f0a916c3e80913ab90141109d6"
+    }
+  },
+  "target_model": {
+    "repository": "LibertAIDAI/GLM-5.3-Flash-NVFP4",
+    "revision": "caca4e6a4ebbd66f159d3d2fc256683fd6e27177",
+    "path": "/workspace/models/GLM-5.3-Flash-NVFP4",
+    "file_count": 131,
+    "model_shards": 120,
+    "total_bytes": 194701812547,
+    "hashes": {
+      "config.json": "5db46f44956e4a8a0cc8ed54b6d77bf99dd7c1ec90c58975d1952560768513d5",
+      "model.safetensors.index.json": "0a5cb10ccc9bfdfe7a4e857e69fb6eea229cc98343986db27ca95e4266e1a2d9",
+      "chat_template.jinja": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891",
+      "generation_config.json": "230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f",
+      "model-input-scales.safetensors": "b812b4d7df15dedb06e74defa6380fecba61d45b8c117fb42eda1443430d2a4a"
+    }
+  },
+  "draft_model": {
+    "repository": "incoai/GLM-5.3-Flash-DFlash2",
+    "revision": "bf582e4eacc1810f76656d1811693ff6c6737d2a",
+    "path": "/workspace/models/GLM-5.3-Flash-DFlash2",
+    "license": "CC-BY-NC-ND-4.0",
+    "files": {
+      "config.json": {
+        "bytes": 1273,
+        "sha256": "c4aeac0101196a6e26705b34c45230bcd0c7c68ee2d2d1efdb242087f3712573"
+      },
+      "model.safetensors": {
+        "bytes": 2342169800,
+        "sha256": "b038e1d9d1e7833fa3880c2c0135ba9b673013f03da1b29fb831931584759dac"
+      }
+    },
+    "native_block_size": 8,
+    "sliding_window": 2048,
+    "target_layer_ids": [5, 14, 24, 33, 42]
+  },
+  "profile": {
+    "hardware": "NVIDIA B300 SXM6 AC",
+    "cuda_arch": "sm_103a",
+    "tensor_parallel_size": 1,
+    "expert_parallel_size": 1,
+    "context_length": 131072,
+    "max_total_tokens": 131072,
+    "max_running_requests": 1,
+    "chunked_prefill_size": 4096,
+    "max_prefill_tokens": 4096,
+    "mem_fraction_static": 0.88,
+    "mamba_full_memory_ratio": 2,
+    "kv_cache_dtype": "bfloat16",
+    "dsa_backend": "tilelang",
+    "dsa_paged_mqa_logits_backend": "deepgemm",
+    "moe_runner_backend": "flashinfer_cutedsl",
+    "dflash_draft_tokens": 8,
+    "dflash_draft_window_size": 2048,
+    "cuda_graph_max_batch_size": 1,
+    "baseline_environment": {
+      "SGLANG_OPT_USE_TOPK_V2": "0",
+      "SGLANG_DSA_FUSE_TOPK": "1",
+      "SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION": "0",
+      "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA": "0",
+      "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA_DG_OUT_OF_GRAPH": "0",
+      "SGLANG_GLM53_FUSE_MHC_POST_PRE": "0",
+      "SGLANG_OPT_USE_TILELANG_INDEXER": "0",
+      "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "0",
+      "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
+      "SGLANG_OPT_FP8_WO_A_GEMM": "1"
+    }
+  },
+  "performance_experiments": {
+    "default": "baseline",
+    "one_candidate_per_restart": true,
+    "selection_env": "DFLASH_PERF_EXPERIMENT",
+    "promotion_threshold_decode_gain_fraction": 0.03,
+    "isolated_candidates": {
+      "replayssm-spec": "Fold only the accepted prefix instead of copying full recurrent-state snapshots per draft token.",
+      "topk-v2": "Use the corrected JIT radix top-k and direct output-buffer planning.",
+      "kpool-metadata": "Fuse KPool metadata transforms into device kernels.",
+      "ingraph-metadata": "Replay target-verify metadata refresh inside the CUDA graph.",
+      "mhc-post-pre": "Fuse the attention-to-MLP mHC post/pre boundary.",
+      "deepgemm-hc-prenorm": "Use the SM10x DeepGEMM mHC prenorm GEMM instead of the split-k fallback.",
+      "cutedsl-paged-mqa": "Use the SM10x CuTe DSL paged-MQA logits kernel selected for low batch and long context.",
+      "blackwell-dsa": "Use the pinned SGLang Blackwell defaults: FlashMLA sparse prefill and TensorRT-LLM decode."
+    },
+    "integration_candidate": {
+      "name": "b300-cyclepack",
+      "combines": [
+        "replayssm-spec",
+        "topk-v2",
+        "kpool-metadata",
+        "ingraph-metadata",
+        "mhc-post-pre",
+        "deepgemm-hc-prenorm",
+        "cutedsl-paged-mqa"
+      ],
+      "production_ready": false,
+      "promotion_rule": "Promote only after each included switch passes isolated correctness and repeated workload benchmarks."
+    }
+  },
+  "runpod": {
+    "data_center_id": "EUR-IS-1",
+    "network_volume_id": "1u0a27qypv",
+    "network_volume_size_gb": 300,
+    "network_volume_monthly_price_usd": 21.0,
+    "initial_staging_gpu": "NVIDIA RTX A4000",
+    "initial_staging_pod_id": "t6wh0b351f6cv8",
+    "initial_staging_price_per_hour_usd": 0.25,
+    "b300_price_per_hour_usd": 7.89,
+    "active_b300_pod_id": null,
+    "deployment_state": "staged-no-live-b300",
+    "optimized_bundle_staged_at_utc": "2026-09-03T05:57:37Z",
+    "stage_verification_path": "/workspace/runpod-b300-stage-verification.json",
+    "resume_entrypoint": "/workspace/deploy/runpod-b300-dflash256-boot.sh",
+    "local_model_cache_root": "/models-local",
+    "local_model_copy_threads": 16,
+    "measured_local_model_copy_seconds": 82.69,
+    "persistent_cache_root": "/workspace/cache",
+    "prior_b300_runs": [
+      {
+        "pod_id": "zrcx1ppvsze3im",
+        "terminated_at_utc": "2026-09-03T04:27:44.765845+00:00",
+        "estimated_compute_cost_usd": 10.03
+      },
+      {
+        "pod_id": "6bo3erwph7x1qp",
+        "started_at_utc": "2026-09-03T04:33:31.548Z",
+        "shutdown_prepared_at_utc": "2026-09-03T05:16:48.297970+00:00",
+        "estimated_compute_cost_usd": 5.69,
+        "tps_result_path": "/workspace/dflash256-b300-live-tps.json"
+      }
+    ]
+  },
+  "benchmark": {
+    "timestamp_utc": "2026-09-03",
+    "gpu_name": "NVIDIA B300 SXM6 AC",
+    "compute_capability": "10.3",
+    "gpu_memory_mib": 275040,
+    "target_weight_load_seconds": 185.12,
+    "draft_weight_load_seconds": 1.25,
+    "runtime_start_to_ready_seconds": 510,
+    "request_count": 1,
+    "prompt_tokens": 45,
+    "completion_tokens": 120,
+    "ttft_ms": 1137.18,
+    "decode_tokens_per_second": 436.47,
+    "coherent": true
+  }
+}

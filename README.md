@@ -1,8 +1,8 @@
-# Exact GLM-5.3-Flash-NVFP4 SGLang bundle for 4x RTX PRO 6000 Blackwell (SM120)
+# Exact GLM-5.3-Flash-NVFP4 SGLang deployment bundle
 
-Locked, independently buildable representation of the live Pop!_OS deployment (`glm-5.3-flash-sglang-sm120`). Uses the exact `lmsysorg/sglang:glm-5.3-flash` image digest and preserves the effective server arguments and environment from the validated running container.
+Locked deployment sources for the validated 4× RTX PRO 6000 Blackwell workstation profile and the retained single-B300 Runpod profile. Both use the exact `lmsysorg/sglang:glm-5.3-flash` image digest; each profile preserves its own server arguments, hardware-specific kernel controls, and checkpoint revisions.
 
-The 182 GiB checkpoint is intentionally **not** copied into the image. Compose mounts the verified local checkpoint read-only from `/mnt/llm_models/GLM-5.3-Flash-NVFP4` and reuses the writable SGLang cache at `/home/ser/.cache/sglang-glm53`. The six SM120 compatibility patches are **baked into the image** at their editable-install import paths, so no bind-mounted code is needed.
+The 182 GiB checkpoint is intentionally **not** copied into the image. Compose mounts the verified local checkpoint read-only from `/mnt/llm_models/GLM-5.3-Flash-NVFP4` and reuses the writable SGLang cache at `/home/ser/.cache/sglang-glm53`. The eight compatibility/performance patches are **baked into the image** at their editable-install paths, so no bind-mounted code is needed.
 
 ## Lock points
 
@@ -111,9 +111,12 @@ Risk-adjusted run order:
    KDA states, 16 heads, and a 128x128 state, eight snapshots represent an
    estimated 136-272 MiB per target pass and rank at BF16-FP32. Record the
    automatically selected FP32 state dtype and resulting memory headroom.
-3. **Remove `SGLANG_OPT_USE_TOPK_V2=0` alone.** The pinned decode-shaped v2 path
+3. **Enable `SGLANG_OPT_USE_TOPK_V2=1` alone.** The pinned decode-shaped v2 path
    accepts the exact top-k 2048 geometry and fuses selection with the physical
-   page-table transform, avoiding the page-size-one table on that path.
+   page-table transform, avoiding the page-size-one table on that path. The
+   bundle installs the exact corrected header from SGLang PR `#37625`
+   (`1436d19a9a55cb9fa0ea93e2f266a0c41ef25d0f`); the older kernel could discard
+   valid candidates when a radix bin exceeded its 4,096-entry stash.
 4. **Enable KPool metadata fusion alone** with
    `SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION=1`. The bundled backend's
    validated envelope exactly matches index-kpool 4, page size 64, and top-k
@@ -187,6 +190,7 @@ Prepared files:
 - `select-dflash-experiment.py` — atomic candidate selection with optional service restart
 - `sglang-glm-dflash256.service` — replacement systemd unit
 - `benchmark-minimal.py` — exactly one useful coding request, capped at 256 completion tokens, plus candidate identity, active width, and optional average acceptance
+- `patches/sglang-kpool_topk_transform-glm53.cuh` — exact PR `#37625` top-k v2 correctness kernel, hash-locked in `manifest.json`
 
 To avoid billing four GPUs during preparation, first boot the retained OS volume on Verda's `CPU.4V.16G` type, attach the retained model volume, copy this bundle to `/workspace/deploy`, run `stage-dflash2.sh`, install the prepared systemd unit, and delete the CPU VM without `--with-volumes`. The exact location, instance types, volume IDs, and SSH key ID are locked in `verda-dflash256-manifest.json`.
 
@@ -208,5 +212,86 @@ python3 /workspace/deploy/benchmark-minimal.py
 ```
 
 The benchmark does not restart the server for a baseline, generate a repetitive attractor, sweep draft widths, or synthesize a long prompt. Measure only one explicitly selected candidate per restart.
+
+## Runpod single-B300 profile
+
+`runpod-b300-manifest.json` locks the resumable TP1 profile for an NVIDIA B300
+SXM6 AC (`sm_103a`) in Runpod `EUR-IS-1`. The target and DFlash2 checkpoints,
+verification records, compiled-kernel cache, and deployment bundle live on
+network volume `1u0a27qypv`; a B300 pod is not required while the deployment is
+parked.
+The optimized bundle was staged at `2026-09-03T05:57:37Z`; the staging run
+revalidated the target shard inventory and locked metadata, fully hashed the
+2.34 GB draft checkpoint, and left no B300 pod active. Its per-file deployment
+record is `/workspace/runpod-b300-stage-verification.json`.
+
+The prior live width-eight coding request produced coherent output at 436.47
+decode tokens/s with 1,137.18 ms TTFT. That number records the pre-optimization
+run, not the unlaunched candidates below. TP1 removes the TP4 NCCL path and the
+SM120 NoPE bridge from the hot path, leaving KDA/mHC, DSA indexer/top-k/metadata,
+sparse attention, and MoE as the relevant kernel surfaces.
+
+The B300 baseline keeps every invasive fusion disabled, but restores the pinned
+SGLang SM10x defaults that the earlier launcher inherited from the SM120
+workaround: non-TileLang DSV4 indexer selection, non-Torch paged-MQA fallback,
+and FP8 `wo_a` GEMM. These switches are explicit so a reused pod environment
+cannot silently change the baseline. `SGLANG_OPT_DEEPGEMM_HC_PRENORM` remains
+off in the baseline and is measured separately.
+
+Select exactly one isolated candidate with `DFLASH_PERF_EXPERIMENT`:
+
+- `replayssm-spec` — fold only the accepted recurrent-state prefix.
+- `topk-v2` — corrected JIT radix selection plus direct plan output.
+- `kpool-metadata` — fuse the KPool metadata transforms.
+- `ingraph-metadata` — add the target-verify metadata refresh to the CUDA graph.
+- `mhc-post-pre` — fuse the attention-to-MLP mHC boundary.
+- `deepgemm-hc-prenorm` — replace the split-k mHC prenorm path with the SM10x
+  DeepGEMM kernel.
+- `cutedsl-paged-mqa` — use the SM10x CuTe DSL indexer kernel; the pinned SGLang
+  interface identifies it as the low-batch, long-context path.
+- `blackwell-dsa` — compare SGLang's Blackwell BF16 defaults
+  (`flashmla_sparse` prefill, `trtllm` decode) against the validated TileLang
+  backend.
+
+`b300-cyclepack` combines every candidate above except `blackwell-dsa`. It is an
+integration experiment, is **not** production-ready, and is never selected by
+default. Promote it only after its members produce coherent output in isolation,
+do not materially reduce DFlash acceptance, reduce the targeted kernel time,
+and improve repeated end-to-end decode throughput by at least 3%.
+
+Prepared Runpod files:
+
+- `runpod-b300-manifest.json` — image/checkpoint locks, prior live measurement,
+  persistent-volume contract, and candidate definitions
+- `stage-runpod-b300.py` — resumable checkpoint download and verification
+- `runpod-b300-dflash256-boot.sh` — parallel local-NVMe model copy, patch/hash
+  verification, persistent JIT caches, candidate selection, and server launch
+- `benchmark-minimal.py` — the same single-request, low-reasoning coding workload
+  used by the Verda candidate protocol
+
+To resume, create one B300 pod in `EUR-IS-1` with the pinned image, attach volume
+`1u0a27qypv` at `/workspace`, expose port 8000, and provide `SGLANG_API_KEY` as a
+secret environment variable. Start the known-safe profile first:
+
+```bash
+export DFLASH_PERF_EXPERIMENT=baseline
+export DFLASH_DRAFT_TOKENS=8
+exec /workspace/deploy/runpod-b300-dflash256-boot.sh
+```
+
+The launcher copies the verified ~197 GB checkpoint from network storage to
+`/models-local` with 16 workers before loading it, then reuses
+`/workspace/cache` for SGLang, Triton, TorchInductor, CUDA, and Hugging Face
+caches. After `/health` is ready, benchmark the selected profile once:
+
+```bash
+python3 /workspace/deploy/benchmark-minimal.py \
+  --output /workspace/dflash256-b300-${DFLASH_PERF_EXPERIMENT}-benchmark.json
+```
+
+Every launch re-hashes all eight runtime patches, compiles only the seven Python
+patches as Python, verifies both checkpoint records, and writes a candidate-
+specific server log. This makes a later B300 launch reproducible without keeping
+an idle GPU pod alive.
 
 The draft checkpoint is licensed `CC-BY-NC-ND-4.0`; review that license before commercial use.

@@ -48,6 +48,16 @@
       "source": "patches/sglang-communicator_mhc-glm53.py",
       "target": "/sgl-workspace/sglang/python/sglang/srt/layers/communicator_mhc.py",
       "sha256": "74f88e7939839d92f1b29321d17e7cdadefa78eb3bd1595b40241883c831f63c"
+    },
+    {
+      "source": "patches/sglang-kpool_topk_transform-glm53.cuh",
+      "target": "/sgl-workspace/sglang/python/sglang/kernels/jit/csrc/dsa/kpool_topk_transform.cuh",
+      "sha256": "f197e91a989076f776bfb45262b2d77a5b7447f0a916c3e80913ab90141109d6",
+      "upstream": {
+        "repository": "ormandj/sglang",
+        "pull_request": 37625,
+        "revision": "1436d19a9a55cb9fa0ea93e2f266a0c41ef25d0f"
+      }
     }
   ],
   "hardware": {
@@ -87,6 +97,7 @@
       "SGLANG_DSA_FUSE_TOPK": "1",
       "SGLANG_EXPERIMENTAL_DSA_KPOOL_METADATA_FUSION": "0",
       "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA": "0",
+      "SGLANG_EXPERIMENTAL_DSA_INGRAPH_VERIFY_METADATA_DG_OUT_OF_GRAPH": "0",
       "SGLANG_GLM53_FUSE_MHC_POST_PRE": "0",
       "SGLANG_OPT_USE_TILELANG_INDEXER": "1",
       "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH": "1",
